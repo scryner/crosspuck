@@ -155,6 +155,10 @@ impl ReplayPlayer {
         self.next_index >= self.script.len()
     }
 
+    pub fn startup_delay_elapsed(&self) -> bool {
+        Instant::now() >= self.created_at + self.startup_delay
+    }
+
     pub fn read_next_blocking(&mut self, output: &mut [u8]) -> Result<usize, ReplayError> {
         if output.is_empty() {
             return Ok(0);

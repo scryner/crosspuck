@@ -46,7 +46,8 @@ mod windows_proxy {
     const FAKE_VENDOR_PREPARSED_VALUE: usize = 0x4350_5543_4850_564E;
     const VIRTUAL_INTERFACE_RESERVED_BASE: usize = 0x4350_5543_5349_0000;
     const SPINT_ACTIVE: u32 = 0x0000_0001;
-    const DEFAULT_REPLAY_DELAY_MS: u64 = 60_000;
+    const COMPILED_REPLAY_ENABLED: bool = true;
+    const COMPILED_REPLAY_DELAY_MS: u64 = 60_000;
     const DEFAULT_IDLE_READ_DELAY_MS: u64 = 16;
     const DEFAULT_IDLE_READ_MAX_REPORTS: usize = 0;
     const DEFAULT_TRACE_REPORT_LIMIT: usize = 256;
@@ -306,6 +307,7 @@ mod windows_proxy {
     static VENDOR_OPEN_COUNT: AtomicUsize = AtomicUsize::new(0);
     static VIRTUAL_STREAM_CONNECTED: AtomicBool = AtomicBool::new(true);
     static WINDOW_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+    static REPLAY_TAKEOVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
     thread_local! {
         static LOGGING: Cell<bool> = const { Cell::new(false) };
@@ -483,11 +485,8 @@ mod windows_proxy {
 
     impl RuntimeConfig {
         fn from_env() -> Self {
-            let replay_enabled = env_bool("CROSSPUCK_ENABLE_REPLAY", false);
-            let replay_delay = Duration::from_millis(env_u64(
-                "CROSSPUCK_REPLAY_DELAY_MS",
-                DEFAULT_REPLAY_DELAY_MS,
-            ));
+            let replay_enabled = COMPILED_REPLAY_ENABLED;
+            let replay_delay = Duration::from_millis(COMPILED_REPLAY_DELAY_MS);
             let idle_read_delay = Duration::from_millis(env_u64(
                 "CROSSPUCK_IDLE_READ_DELAY_MS",
                 DEFAULT_IDLE_READ_DELAY_MS,
@@ -2910,7 +2909,7 @@ mod windows_proxy {
             return result;
         }
 
-        if !CONFIG.get().is_some_and(|config| config.replay_enabled) {
+        if !replay_stream_active() {
             return read_recognition_report(buffer, bytes_to_read, bytes_read);
         }
 
@@ -2982,7 +2981,7 @@ mod windows_proxy {
             };
         }
 
-        if !CONFIG.get().is_some_and(|config| config.replay_enabled) {
+        if !replay_stream_active() {
             return read_recognition_report_ready(buffer, bytes_to_read);
         }
 
@@ -3116,6 +3115,32 @@ mod windows_proxy {
                 Err(())
             }
         }
+    }
+
+    fn replay_stream_active() -> bool {
+        let Some(config) = CONFIG.get() else {
+            return false;
+        };
+        if !config.replay_enabled {
+            return false;
+        }
+        if REPLAY_TAKEOVER_ACTIVE.load(Ordering::Relaxed) {
+            return true;
+        }
+
+        let Some(player) = PLAYER.get() else {
+            return false;
+        };
+        let elapsed = player
+            .lock()
+            .is_ok_and(|guard| guard.startup_delay_elapsed());
+        if elapsed && !REPLAY_TAKEOVER_ACTIVE.swap(true, Ordering::Relaxed) {
+            debug_line(&format!(
+                "[crosspuck] replay takeover active after {}ms; recognition stream remains disabled for active slot",
+                config.replay_delay.as_millis()
+            ));
+        }
+        elapsed
     }
 
     fn should_claim_path(path: &str) -> bool {
