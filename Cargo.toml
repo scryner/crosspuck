@@ -1,0 +1,10 @@
+[package]
+name = "crosspuck-host"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side macOS HID raw packet sniffer PoC for Steam Controller compatibility experiments"
+license = "MIT"
+
+[dependencies]
+hidapi = "2.6"
+serde_json = "1.0"
