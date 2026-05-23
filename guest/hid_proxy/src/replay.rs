@@ -177,6 +177,54 @@ impl ReplayPlayer {
         self.replay_idle_packet(output)
     }
 
+    pub fn read_next_ready(&mut self, output: &mut [u8]) -> Result<Option<usize>, ReplayError> {
+        if output.is_empty() {
+            return Ok(Some(0));
+        }
+
+        let now = Instant::now();
+        if now < self.created_at + self.startup_delay {
+            return Ok(None);
+        }
+
+        if self.replay_origin.is_none() {
+            self.replay_origin = Some(now);
+        }
+
+        if self.next_index < self.script.len() {
+            let packet = &self.script.packets[self.next_index];
+            let due_at = self.replay_origin.unwrap() + packet.elapsed;
+            if now < due_at {
+                return Ok(None);
+            }
+            self.next_index += 1;
+            return Ok(Some(copy_packet(output, &packet.bytes)));
+        }
+
+        self.replay_idle_packet_ready(output, now)
+    }
+
+    pub fn next_due_in(&self) -> Duration {
+        let now = Instant::now();
+        let startup_at = self.created_at + self.startup_delay;
+        if now < startup_at {
+            return startup_at - now;
+        }
+
+        let Some(origin) = self.replay_origin else {
+            return Duration::ZERO;
+        };
+
+        if self.next_index < self.script.len() {
+            let due_at = origin + self.script.packets[self.next_index].elapsed;
+            return due_at.saturating_duration_since(now);
+        }
+
+        self.next_idle_at
+            .map(|due_at| due_at.saturating_duration_since(now))
+            .unwrap_or(Duration::ZERO)
+    }
+
     fn wait_for_startup_delay(&self) {
         sleep_until(self.created_at + self.startup_delay);
     }
@@ -190,6 +238,23 @@ impl ReplayPlayer {
         sleep_until(due_at);
         self.next_idle_at = Some(Instant::now() + self.idle_interval);
         Ok(copy_packet(output, &last_packet.bytes))
+    }
+
+    fn replay_idle_packet_ready(
+        &mut self,
+        output: &mut [u8],
+        now: Instant,
+    ) -> Result<Option<usize>, ReplayError> {
+        let Some(last_packet) = self.script.packets.last() else {
+            return Err(ReplayError::NoPackets);
+        };
+
+        let due_at = self.next_idle_at.unwrap_or(now);
+        if now < due_at {
+            return Ok(None);
+        }
+        self.next_idle_at = Some(now + self.idle_interval);
+        Ok(Some(copy_packet(output, &last_packet.bytes)))
     }
 }
 
@@ -318,6 +383,27 @@ mod tests {
         assert_eq!(&buffer[..3], &[0x42, 0x02, 0x01]);
         assert!(player.is_complete());
         assert_eq!(player.read_next_blocking(&mut buffer).unwrap(), 3);
+        assert_eq!(&buffer[..3], &[0x42, 0x02, 0x01]);
+    }
+
+    #[test]
+    fn nonblocking_read_returns_none_until_due() {
+        let script = ReplayScript::from_jsonl(
+            r#"
+{"schema":"crosspuck.host.capture.v1","type":"metadata"}
+{"bytes_read":3,"elapsed_us":0,"hex":"42 01 00","seq":1,"type":"packet"}
+{"bytes_read":3,"elapsed_us":50000,"hex":"42 02 01","seq":2,"type":"packet"}
+"#,
+        )
+        .unwrap();
+        let mut player = ReplayPlayer::new(script, Duration::ZERO);
+        let mut buffer = [0_u8; 8];
+
+        assert_eq!(player.read_next_ready(&mut buffer).unwrap(), Some(3));
+        assert_eq!(&buffer[..3], &[0x42, 0x01, 0x00]);
+        assert_eq!(player.read_next_ready(&mut buffer).unwrap(), None);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(player.read_next_ready(&mut buffer).unwrap(), Some(3));
         assert_eq!(&buffer[..3], &[0x42, 0x02, 0x01]);
     }
 

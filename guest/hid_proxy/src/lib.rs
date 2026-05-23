@@ -5,7 +5,8 @@ mod windows_proxy {
     use crate::replay::{ReplayPlayer, ReplayScript};
     use min_hook_rs::{create_hook_api, enable_hook, initialize};
     use std::cell::Cell;
-    use std::ffi::{c_char, c_int, c_void};
+    use std::collections::VecDeque;
+    use std::ffi::{c_char, c_int, c_void, CString};
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
@@ -34,9 +35,17 @@ mod windows_proxy {
     const TRUE_U8: u8 = 1;
     const FALSE_U8: u8 = 0;
     const VIRTUAL_MAIN_HANDLE_VALUE: isize = -0x4350_5543;
+    const VIRTUAL_IF3_HANDLE_VALUE: isize = -0x4350_5545;
+    const VIRTUAL_IF4_HANDLE_VALUE: isize = -0x4350_5546;
+    const VIRTUAL_IF5_HANDLE_VALUE: isize = -0x4350_5547;
     const VIRTUAL_VENDOR_HANDLE_VALUE: isize = -0x4350_5544;
     const FAKE_MAIN_PREPARSED_VALUE: usize = 0x4350_5543_4850_4D41;
+    const FAKE_IF3_PREPARSED_VALUE: usize = 0x4350_5543_4850_4933;
+    const FAKE_IF4_PREPARSED_VALUE: usize = 0x4350_5543_4850_4934;
+    const FAKE_IF5_PREPARSED_VALUE: usize = 0x4350_5543_4850_4935;
     const FAKE_VENDOR_PREPARSED_VALUE: usize = 0x4350_5543_4850_564E;
+    const VIRTUAL_INTERFACE_RESERVED_BASE: usize = 0x4350_5543_5349_0000;
+    const SPINT_ACTIVE: u32 = 0x0000_0001;
     const DEFAULT_REPLAY_DELAY_MS: u64 = 60_000;
     const DEFAULT_IDLE_READ_DELAY_MS: u64 = 16;
     const DEFAULT_IDLE_READ_MAX_REPORTS: usize = 0;
@@ -68,12 +77,15 @@ mod windows_proxy {
     const SPDRP_ENUMERATOR_NAME: u32 = 0x0000_0016;
     const SPDRP_LOCATION_PATHS: u32 = 0x0000_0023;
     const EMBEDDED_REPLAY_JSONL: &str = include_str!("../../../captures/a_button_taps.jsonl");
+    const EMBEDDED_RECOGNITION_JSONL: &str =
+        include_str!("../../../captures/power_on_idle_70s.jsonl");
     const VIRTUAL_VENDOR_ID: u16 = 0x28DE;
     const VIRTUAL_PRODUCT_ID: u16 = 0x1304;
     const VIRTUAL_VERSION_NUMBER: u16 = 0x0002;
     const VIRTUAL_MANUFACTURER: &str = "Valve Software";
     const VIRTUAL_PRODUCT: &str = "Steam Controller Puck";
     const VIRTUAL_SERIAL: &str = "FXB9961303C9C";
+    const HID_INTERFACE_GUID_STRING: &str = "{4d1e55b2-f16f-11cf-88cb-001111000030}";
     const DEVPKEY_DEVICE_DEVICE_DESC: DEVPROPKEY = DEVPROPKEY {
         fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
         pid: 2,
@@ -140,7 +152,11 @@ mod windows_proxy {
     type SdlQuitFn = unsafe extern "C" fn();
     type SdlQuitSubSystemFn = unsafe extern "C" fn(u32);
     type SdlOpaqueCloseFn = unsafe extern "C" fn(*mut c_void);
+    type SdlHidEnumerateFn = unsafe extern "C" fn(u16, u16) -> *mut SdlHidDeviceInfo;
+    type SdlHidFreeEnumerationFn = unsafe extern "C" fn(*mut SdlHidDeviceInfo);
     type SdlHidOpenPathFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+    type SdlHidReadTimeoutFn = unsafe extern "C" fn(*mut c_void, *mut u8, usize, c_int) -> c_int;
+    type SdlHidWriteFn = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> c_int;
     type SdlHidGetFeatureReportFn = unsafe extern "C" fn(*mut c_void, *mut u8, usize) -> c_int;
     type SdlHidSendFeatureReportFn = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> c_int;
     type CreateFileWFn = unsafe extern "system" fn(
@@ -220,7 +236,7 @@ mod windows_proxy {
 
     static CONFIG: OnceLock<RuntimeConfig> = OnceLock::new();
     static PLAYER: OnceLock<Mutex<ReplayPlayer>> = OnceLock::new();
-    static IDLE_REPORT: OnceLock<Vec<u8>> = OnceLock::new();
+    static RECOGNITION_PLAYER: OnceLock<Mutex<ReplayPlayer>> = OnceLock::new();
     static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
     static REAL_HID_MODULE: OnceLock<usize> = OnceLock::new();
     static ORIGINAL_READ_FILE: OnceLock<ReadFileFn> = OnceLock::new();
@@ -232,7 +248,11 @@ mod windows_proxy {
     static ORIGINAL_SDL_QUIT: OnceLock<SdlQuitFn> = OnceLock::new();
     static ORIGINAL_SDL_QUIT_SUB_SYSTEM: OnceLock<SdlQuitSubSystemFn> = OnceLock::new();
     static ORIGINAL_SDL_HID_CLOSE: OnceLock<SdlOpaqueCloseFn> = OnceLock::new();
+    static ORIGINAL_SDL_HID_ENUMERATE: OnceLock<SdlHidEnumerateFn> = OnceLock::new();
+    static ORIGINAL_SDL_HID_FREE_ENUMERATION: OnceLock<SdlHidFreeEnumerationFn> = OnceLock::new();
     static ORIGINAL_SDL_HID_OPEN_PATH: OnceLock<SdlHidOpenPathFn> = OnceLock::new();
+    static ORIGINAL_SDL_HID_READ_TIMEOUT: OnceLock<SdlHidReadTimeoutFn> = OnceLock::new();
+    static ORIGINAL_SDL_HID_WRITE: OnceLock<SdlHidWriteFn> = OnceLock::new();
     static ORIGINAL_SDL_HID_GET_FEATURE_REPORT: OnceLock<SdlHidGetFeatureReportFn> =
         OnceLock::new();
     static ORIGINAL_SDL_HID_SEND_FEATURE_REPORT: OnceLock<SdlHidSendFeatureReportFn> =
@@ -266,8 +286,12 @@ mod windows_proxy {
     static ORIGINAL_SETUPDI_GET_DEVICE_PROPERTY_W: OnceLock<SetupDiGetDevicePropertyWFn> =
         OnceLock::new();
     static VIRTUAL_DEVINSTS: OnceLock<Mutex<Vec<(u32, VirtualHidProfile)>>> = OnceLock::new();
+    static SYNTHETIC_ENUM_BASES: OnceLock<Mutex<Vec<(usize, u32)>>> = OnceLock::new();
     static CONTROLLER_LOG_HANDLES: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
     static SDL_VIRTUAL_HID_DEVICES: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+    static SDL_AUGMENTED_ENUMERATIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+    static SDL_FEATURE_COMMANDS: OnceLock<Mutex<Vec<SdlFeatureCommand>>> = OnceLock::new();
+    static PENDING_INPUT_REPORTS: OnceLock<Mutex<VecDeque<PendingInputReport>>> = OnceLock::new();
     static CREATE_FILE_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GET_PROC_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
     static VIRTUAL_IO_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -276,12 +300,29 @@ mod windows_proxy {
     static REPLAY_READ_COUNT: AtomicUsize = AtomicUsize::new(0);
     static REPORT_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static MAIN_OPEN_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static IF3_OPEN_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static IF4_OPEN_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static IF5_OPEN_COUNT: AtomicUsize = AtomicUsize::new(0);
     static VENDOR_OPEN_COUNT: AtomicUsize = AtomicUsize::new(0);
     static VIRTUAL_STREAM_CONNECTED: AtomicBool = AtomicBool::new(true);
     static WINDOW_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 
     thread_local! {
         static LOGGING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[derive(Clone, Debug)]
+    struct SdlFeatureCommand {
+        device: usize,
+        report_id: u8,
+        command: u8,
+        request_value: u8,
+    }
+
+    #[derive(Clone, Debug)]
+    struct PendingInputReport {
+        device: usize,
+        report: Vec<u8>,
     }
 
     #[derive(Clone, Debug)]
@@ -314,13 +355,19 @@ mod windows_proxy {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum VirtualHidProfile {
         Main,
+        Interface3,
+        Interface4,
+        Interface5,
         VendorDongle,
     }
 
     impl VirtualHidProfile {
         fn label(self) -> &'static str {
             match self {
-                Self::Main => "puck-main",
+                Self::Main => "puck-if2-main",
+                Self::Interface3 => "puck-if3",
+                Self::Interface4 => "puck-if4",
+                Self::Interface5 => "puck-if5",
                 Self::VendorDongle => "puck-vendor-dongle",
             }
         }
@@ -328,24 +375,34 @@ mod windows_proxy {
         fn handle(self) -> HANDLE {
             match self {
                 Self::Main => VIRTUAL_MAIN_HANDLE_VALUE as HANDLE,
+                Self::Interface3 => VIRTUAL_IF3_HANDLE_VALUE as HANDLE,
+                Self::Interface4 => VIRTUAL_IF4_HANDLE_VALUE as HANDLE,
+                Self::Interface5 => VIRTUAL_IF5_HANDLE_VALUE as HANDLE,
                 Self::VendorDongle => VIRTUAL_VENDOR_HANDLE_VALUE as HANDLE,
             }
+        }
+
+        fn sdl_device(self) -> *mut c_void {
+            self.handle() as *mut c_void
         }
 
         fn preparsed_data(self) -> *mut c_void {
             match self {
                 Self::Main => FAKE_MAIN_PREPARSED_VALUE as *mut c_void,
+                Self::Interface3 => FAKE_IF3_PREPARSED_VALUE as *mut c_void,
+                Self::Interface4 => FAKE_IF4_PREPARSED_VALUE as *mut c_void,
+                Self::Interface5 => FAKE_IF5_PREPARSED_VALUE as *mut c_void,
                 Self::VendorDongle => FAKE_VENDOR_PREPARSED_VALUE as *mut c_void,
             }
         }
 
         fn caps(self) -> HidpCaps {
             match self {
-                // Steam opens the Puck through its vendor-defined collection, not the
-                // mouse/keyboard collections that macOS also exposes for lizard mode.
-                Self::Main => HidpCaps {
+                // Current native Steam sees Puck interfaces 2-5 as Generic Desktop
+                // top-level collections before wireless controller recognition.
+                Self::Main | Self::Interface3 | Self::Interface4 | Self::Interface5 => HidpCaps {
                     usage: 0x0001,
-                    usage_page: 0xFF00,
+                    usage_page: 0x0001,
                     input_report_byte_length: 54,
                     output_report_byte_length: 64,
                     feature_report_byte_length: 64,
@@ -382,6 +439,45 @@ mod windows_proxy {
                     number_feature_data_indices: 1,
                 },
             }
+        }
+
+        fn interface_number(self) -> u8 {
+            match self {
+                Self::Main => 2,
+                Self::Interface3 => 3,
+                Self::Interface4 => 4,
+                Self::Interface5 => 5,
+                Self::VendorDongle => 6,
+            }
+        }
+
+        fn collection_number(self) -> u8 {
+            match self {
+                Self::VendorDongle => 2,
+                _ => 1,
+            }
+        }
+
+        fn instance_suffix(self) -> u8 {
+            match self {
+                Self::Main => 1,
+                Self::Interface3 => 2,
+                Self::Interface4 => 3,
+                Self::Interface5 => 4,
+                Self::VendorDongle => 5,
+            }
+        }
+
+        fn synthetic_devinst(self) -> u32 {
+            0x4350_0000 | u32::from(self.interface_number())
+        }
+
+        fn is_active_controller_slot(self) -> bool {
+            matches!(self, Self::Main)
+        }
+
+        fn interface_reserved(self) -> usize {
+            VIRTUAL_INTERFACE_RESERVED_BASE | self.interface_number() as usize
         }
     }
 
@@ -514,6 +610,33 @@ mod windows_proxy {
         reserved: usize,
     }
 
+    #[repr(C)]
+    struct SpDeviceInterfaceData {
+        cb_size: u32,
+        interface_class_guid: GUID,
+        flags: u32,
+        reserved: usize,
+    }
+
+    #[repr(C)]
+    struct SdlHidDeviceInfo {
+        path: *mut c_char,
+        vendor_id: u16,
+        product_id: u16,
+        serial_number: *mut u16,
+        release_number: u16,
+        manufacturer_string: *mut u16,
+        product_string: *mut u16,
+        usage_page: u16,
+        usage: u16,
+        interface_number: c_int,
+        interface_class: c_int,
+        interface_subclass: c_int,
+        interface_protocol: c_int,
+        bus_type: c_int,
+        next: *mut SdlHidDeviceInfo,
+    }
+
     struct RegistryValue {
         reg_type: u32,
         entries: Vec<&'static str>,
@@ -592,16 +715,28 @@ mod windows_proxy {
             .set(config.clone())
             .map_err(|_| "runtime config already initialized".to_string())?;
         VIRTUAL_STREAM_CONNECTED.store(true, Ordering::Relaxed);
-        let script =
+        let replay_script =
             ReplayScript::from_jsonl(EMBEDDED_REPLAY_JSONL).map_err(|error| error.to_string())?;
-        let packet_count = script.len();
-        let idle_report = script.packets()[0].bytes.clone();
-        IDLE_REPORT
-            .set(idle_report)
-            .map_err(|_| "idle report already initialized".to_string())?;
+        let packet_count = replay_script.len();
+        let recognition_script = ReplayScript::from_jsonl(EMBEDDED_RECOGNITION_JSONL)
+            .map_err(|error| error.to_string())?;
+        let recognition_packet_count = recognition_script.len();
+        RECOGNITION_PLAYER
+            .set(Mutex::new(ReplayPlayer::new(
+                recognition_script,
+                Duration::ZERO,
+            )))
+            .map_err(|_| "recognition player already initialized".to_string())?;
         PLAYER
-            .set(Mutex::new(ReplayPlayer::new(script, config.replay_delay)))
+            .set(Mutex::new(ReplayPlayer::new(
+                replay_script,
+                config.replay_delay,
+            )))
             .map_err(|_| "replay player already initialized".to_string())?;
+        debug_line(&format!(
+            "[crosspuck] loaded embedded recognition stream packets={} source=power_on_idle_70s.jsonl",
+            recognition_packet_count
+        ));
 
         initialize().map_err(|error| format!("hook initialize failed: {error:?}"))?;
         install_hook(
@@ -918,12 +1053,54 @@ mod windows_proxy {
         );
         install_optional_hook(
             "SDL3.dll",
+            "SDL_hid_enumerate",
+            detoured_sdl_hid_enumerate as *mut c_void,
+            |ptr| {
+                ORIGINAL_SDL_HID_ENUMERATE
+                    .set(unsafe { std::mem::transmute(ptr) })
+                    .map_err(|_| "SDL_hid_enumerate trampoline already initialized".to_string())
+            },
+        );
+        install_optional_hook(
+            "SDL3.dll",
+            "SDL_hid_free_enumeration",
+            detoured_sdl_hid_free_enumeration as *mut c_void,
+            |ptr| {
+                ORIGINAL_SDL_HID_FREE_ENUMERATION
+                    .set(unsafe { std::mem::transmute(ptr) })
+                    .map_err(|_| {
+                        "SDL_hid_free_enumeration trampoline already initialized".to_string()
+                    })
+            },
+        );
+        install_optional_hook(
+            "SDL3.dll",
             "SDL_hid_open_path",
             detoured_sdl_hid_open_path as *mut c_void,
             |ptr| {
                 ORIGINAL_SDL_HID_OPEN_PATH
                     .set(unsafe { std::mem::transmute(ptr) })
                     .map_err(|_| "SDL_hid_open_path trampoline already initialized".to_string())
+            },
+        );
+        install_optional_hook(
+            "SDL3.dll",
+            "SDL_hid_read_timeout",
+            detoured_sdl_hid_read_timeout as *mut c_void,
+            |ptr| {
+                ORIGINAL_SDL_HID_READ_TIMEOUT
+                    .set(unsafe { std::mem::transmute(ptr) })
+                    .map_err(|_| "SDL_hid_read_timeout trampoline already initialized".to_string())
+            },
+        );
+        install_optional_hook(
+            "SDL3.dll",
+            "SDL_hid_write",
+            detoured_sdl_hid_write as *mut c_void,
+            |ptr| {
+                ORIGINAL_SDL_HID_WRITE
+                    .set(unsafe { std::mem::transmute(ptr) })
+                    .map_err(|_| "SDL_hid_write trampoline already initialized".to_string())
             },
         );
         install_optional_hook(
@@ -998,8 +1175,7 @@ mod windows_proxy {
                 }
 
                 let active_virtual_session = REPLAY_READ_COUNT.load(Ordering::Relaxed) > 0
-                    || MAIN_OPEN_COUNT.load(Ordering::Relaxed) > 0
-                    || VENDOR_OPEN_COUNT.load(Ordering::Relaxed) > 0;
+                    || virtual_profiles_open_count() > 0;
                 if !active_virtual_session {
                     no_visible_since = None;
                     std::thread::sleep(config.window_watchdog_interval);
@@ -1241,7 +1417,10 @@ mod windows_proxy {
                 SetLastError(ERROR_DEVICE_NOT_CONNECTED_CODE);
                 return FALSE;
             }
-            return read_replay_report(buffer, bytes_to_read, bytes_read);
+            let Some(profile) = virtual_profile_for_handle(file) else {
+                return FALSE;
+            };
+            return read_virtual_hid_report(profile, buffer, bytes_to_read, bytes_read);
         }
 
         ORIGINAL_READ_FILE.get().copied().map_or(FALSE, |original| {
@@ -1450,6 +1629,7 @@ mod windows_proxy {
     }
 
     unsafe extern "C" fn detoured_sdl_hid_close(device: *mut c_void) {
+        let fake_profile = virtual_profile_for_fake_sdl_device(device);
         forget_sdl_virtual_hid_device(device);
         let should_disconnect = CONFIG
             .get()
@@ -1465,13 +1645,62 @@ mod windows_proxy {
         if should_disconnect {
             disconnect_virtual_stream("SDL_hid_close");
         }
+        if fake_profile.is_some() {
+            return;
+        }
         if let Some(original) = ORIGINAL_SDL_HID_CLOSE.get().copied() {
             original(device);
         }
     }
 
+    unsafe extern "C" fn detoured_sdl_hid_enumerate(
+        vendor_id: u16,
+        product_id: u16,
+    ) -> *mut SdlHidDeviceInfo {
+        let original = ORIGINAL_SDL_HID_ENUMERATE
+            .get()
+            .copied()
+            .map_or(ptr::null_mut(), |original| original(vendor_id, product_id));
+
+        if !should_augment_sdl_hid_enumeration(vendor_id, product_id) {
+            return original;
+        }
+
+        let augmented = augment_sdl_hid_enumeration(original);
+        debug_line(&format!(
+            "[crosspuck] SDL_hid_enumerate vid=0x{vendor_id:04X} pid=0x{product_id:04X} original={original:p} returned={augmented:p}"
+        ));
+        augmented
+    }
+
+    unsafe extern "C" fn detoured_sdl_hid_free_enumeration(device_info: *mut SdlHidDeviceInfo) {
+        if is_augmented_sdl_enumeration(device_info) {
+            debug_line(&format!(
+                "[crosspuck] SDL_hid_free_enumeration augmented head={device_info:p} leaked for PoC safety"
+            ));
+            return;
+        }
+
+        if let Some(original) = ORIGINAL_SDL_HID_FREE_ENUMERATION.get().copied() {
+            original(device_info);
+        }
+    }
+
     unsafe extern "C" fn detoured_sdl_hid_open_path(path: *const c_char) -> *mut c_void {
         let path_text = narrow_z_to_string(path as PCSTR);
+        if let Some(path) = path_text.as_deref() {
+            if should_claim_path(path) && is_valve_puck_path(&path.to_ascii_lowercase()) {
+                let profile = virtual_profile_for_path(path);
+                let device = profile.sdl_device();
+                remember_sdl_virtual_hid_device("SDL_hid_open_path synthetic", device, path);
+                debug_line(&format!(
+                    "[crosspuck] SDL_hid_open_path synthetic profile={} device={device:p} path={path:?}",
+                    profile.label()
+                ));
+                return device;
+            }
+        }
+
         let device = ORIGINAL_SDL_HID_OPEN_PATH
             .get()
             .copied()
@@ -1483,6 +1712,71 @@ mod windows_proxy {
             }
         }
         device
+    }
+
+    unsafe extern "C" fn detoured_sdl_hid_read_timeout(
+        device: *mut c_void,
+        data: *mut u8,
+        len: usize,
+        milliseconds: c_int,
+    ) -> c_int {
+        if is_sdl_virtual_hid_device(device) {
+            let count = if milliseconds == 0 {
+                let Some(profile) = virtual_profile_for_fake_sdl_device(device) else {
+                    return -1;
+                };
+                match read_virtual_hid_report_ready(profile, data as *mut c_void, len as u32) {
+                    Ok(Some(count)) => count,
+                    Ok(None) => return 0,
+                    Err(()) => return -1,
+                }
+            } else {
+                let mut bytes_read = 0_u32;
+                let Some(profile) = virtual_profile_for_fake_sdl_device(device) else {
+                    return -1;
+                };
+                let result = read_virtual_hid_report(
+                    profile,
+                    data as *mut c_void,
+                    len as u32,
+                    &mut bytes_read,
+                );
+                if result != TRUE {
+                    return -1;
+                }
+                bytes_read as usize
+            };
+            log_hidd_report_call(&format!(
+                "[crosspuck] SDL_hid_read_timeout virtual device={device:p} timeout={} requested={} returned={}",
+                milliseconds, len, count
+            ));
+            return count.min(c_int::MAX as usize) as c_int;
+        }
+
+        ORIGINAL_SDL_HID_READ_TIMEOUT
+            .get()
+            .copied()
+            .map_or(-1, |original| original(device, data, len, milliseconds))
+    }
+
+    unsafe extern "C" fn detoured_sdl_hid_write(
+        device: *mut c_void,
+        data: *const u8,
+        len: usize,
+    ) -> c_int {
+        if is_sdl_virtual_hid_device(device) {
+            debug_line(&format!(
+                "[crosspuck] SDL_hid_write virtual device={device:p} len={} head={}",
+                len,
+                hex_head(data, len as u32)
+            ));
+            return len.min(c_int::MAX as usize) as c_int;
+        }
+
+        ORIGINAL_SDL_HID_WRITE
+            .get()
+            .copied()
+            .map_or(-1, |original| original(device, data, len))
     }
 
     unsafe extern "C" fn detoured_sdl_hid_get_feature_report(
@@ -1511,6 +1805,7 @@ mod windows_proxy {
                 len,
                 hex_head(data, len as u32)
             ));
+            remember_sdl_feature_command(device, data, len);
             return len.min(c_int::MAX as usize) as c_int;
         }
 
@@ -1638,6 +1933,27 @@ mod windows_proxy {
                     device_interface_data,
                 )
             });
+        if result == FALSE
+            && device_info_data.is_null()
+            && is_hid_interface_guid(interface_class_guid)
+        {
+            if let Some(profile) =
+                synthetic_profile_for_failed_member_index(device_info_set, member_index)
+            {
+                if write_synthetic_device_interface_data(
+                    device_interface_data,
+                    interface_class_guid,
+                    profile,
+                ) {
+                    debug_line(&format!(
+                        "[crosspuck] SetupDiEnumDeviceInterfaces synthetic profile={} index={}",
+                        profile.label(),
+                        member_index
+                    ));
+                    return TRUE;
+                }
+            }
+        }
         if result == TRUE || member_index < 4 {
             let message = format!(
                 "[crosspuck] SetupDiEnumDeviceInterfaces guid={} index={} -> {}",
@@ -1662,6 +1978,16 @@ mod windows_proxy {
         required_size: *mut u32,
         device_info_data: *mut c_void,
     ) -> BOOL {
+        if let Some(profile) = virtual_profile_for_device_interface_data(device_interface_data) {
+            return synthesize_device_interface_detail_w(
+                profile,
+                device_interface_detail_data,
+                device_interface_detail_data_size,
+                required_size,
+                device_info_data,
+            );
+        }
+
         let result = ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_W
             .get()
             .copied()
@@ -1724,6 +2050,16 @@ mod windows_proxy {
         required_size: *mut u32,
         device_info_data: *mut c_void,
     ) -> BOOL {
+        if let Some(profile) = virtual_profile_for_device_interface_data(device_interface_data) {
+            return synthesize_device_interface_detail_a(
+                profile,
+                device_interface_detail_data,
+                device_interface_detail_data_size,
+                required_size,
+                device_info_data,
+            );
+        }
+
         let result = ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_A
             .get()
             .copied()
@@ -2191,12 +2527,7 @@ mod windows_proxy {
             return;
         }
 
-        *guid = GUID {
-            data1: 0x4D1E55B2,
-            data2: 0xF16F,
-            data3: 0x11CF,
-            data4: [0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30],
-        };
+        *guid = hid_interface_guid();
     }
 
     #[no_mangle]
@@ -2365,7 +2696,11 @@ mod windows_proxy {
                 SetLastError(ERROR_INVALID_HANDLE);
                 return FALSE_U8;
             }
-            return bool_to_u8(read_replay_report(
+            let Some(profile) = virtual_profile_for_handle(device) else {
+                return FALSE_U8;
+            };
+            return bool_to_u8(read_virtual_hid_report(
+                profile,
                 report_buffer,
                 report_buffer_len,
                 ptr::null_mut(),
@@ -2546,13 +2881,37 @@ mod windows_proxy {
         HIDP_STATUS_SUCCESS
     }
 
-    fn read_replay_report(buffer: *mut c_void, bytes_to_read: u32, bytes_read: *mut u32) -> BOOL {
+    fn read_virtual_hid_report(
+        profile: VirtualHidProfile,
+        buffer: *mut c_void,
+        bytes_to_read: u32,
+        bytes_read: *mut u32,
+    ) -> BOOL {
         if buffer.is_null() {
             return FALSE;
         }
 
+        if !profile.is_active_controller_slot() {
+            if !bytes_read.is_null() {
+                unsafe {
+                    *bytes_read = 0;
+                }
+            }
+            log_hidd_report_call(&format!(
+                "[crosspuck] idle profile read profile={} requested={} returned=0",
+                profile.label(),
+                bytes_to_read
+            ));
+            return TRUE;
+        }
+
+        if let Some(result) = read_pending_input_report(profile, buffer, bytes_to_read, bytes_read)
+        {
+            return result;
+        }
+
         if !CONFIG.get().is_some_and(|config| config.replay_enabled) {
-            return read_static_idle_report(buffer, bytes_to_read, bytes_read);
+            return read_recognition_report(buffer, bytes_to_read, bytes_read);
         }
 
         let Some(player) = PLAYER.get() else {
@@ -2599,34 +2958,84 @@ mod windows_proxy {
         }
     }
 
-    fn read_static_idle_report(
+    fn read_virtual_hid_report_ready(
+        profile: VirtualHidProfile,
+        buffer: *mut c_void,
+        bytes_to_read: u32,
+    ) -> Result<Option<usize>, ()> {
+        if buffer.is_null() {
+            return Err(());
+        }
+
+        if !profile.is_active_controller_slot() {
+            return Ok(None);
+        }
+
+        let mut bytes_read = 0_u32;
+        if let Some(result) =
+            read_pending_input_report(profile, buffer, bytes_to_read, &mut bytes_read as *mut u32)
+        {
+            return if result == TRUE {
+                Ok(Some(bytes_read as usize))
+            } else {
+                Err(())
+            };
+        }
+
+        if !CONFIG.get().is_some_and(|config| config.replay_enabled) {
+            return read_recognition_report_ready(buffer, bytes_to_read);
+        }
+
+        let Some(player) = PLAYER.get() else {
+            return Err(());
+        };
+
+        read_player_report_ready("replay", player, buffer, bytes_to_read)
+    }
+
+    fn read_pending_input_report(
+        profile: VirtualHidProfile,
+        buffer: *mut c_void,
+        bytes_to_read: u32,
+        bytes_read: *mut u32,
+    ) -> Option<BOOL> {
+        let queue = PENDING_INPUT_REPORTS.get()?;
+        let device = profile.sdl_device() as usize;
+        let packet = {
+            let mut guard = queue.lock().ok()?;
+            let index = guard.iter().position(|pending| pending.device == device)?;
+            guard.remove(index)?.report
+        };
+        let output =
+            unsafe { slice::from_raw_parts_mut(buffer as *mut u8, bytes_to_read as usize) };
+        output.fill(0);
+        let count = output.len().min(packet.len());
+        output[..count].copy_from_slice(&packet[..count]);
+
+        let read_index = REPLAY_READ_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        debug_line(&format!(
+            "[crosspuck] pending input read #{} requested={} returned={} head={}",
+            read_index,
+            bytes_to_read,
+            count,
+            unsafe { hex_head(buffer as *const u8, count.min(16) as u32) }
+        ));
+
+        if !bytes_read.is_null() {
+            unsafe {
+                *bytes_read = count as u32;
+            }
+        }
+
+        Some(TRUE)
+    }
+
+    fn read_recognition_report(
         buffer: *mut c_void,
         bytes_to_read: u32,
         bytes_read: *mut u32,
     ) -> BOOL {
-        let read_index = REPLAY_READ_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Some(config) = CONFIG.get() {
-            if !config.idle_read_delay.is_zero() {
-                std::thread::sleep(config.idle_read_delay);
-            }
-            if config.idle_read_max_reports > 0 && read_index > config.idle_read_max_reports {
-                if !bytes_read.is_null() {
-                    unsafe {
-                        *bytes_read = 0;
-                    }
-                }
-                disconnect_virtual_stream_after_idle_budget(
-                    read_index,
-                    config.idle_read_max_reports,
-                );
-                unsafe {
-                    SetLastError(ERROR_DEVICE_NOT_CONNECTED_CODE);
-                }
-                return FALSE;
-            }
-        }
-
-        let Some(report) = IDLE_REPORT.get() else {
+        let Some(player) = RECOGNITION_PLAYER.get() else {
             if !bytes_read.is_null() {
                 unsafe {
                     *bytes_read = 0;
@@ -2635,24 +3044,78 @@ mod windows_proxy {
             return FALSE;
         };
 
+        let mut guard = match player.lock() {
+            Ok(guard) => guard,
+            Err(_) => return FALSE,
+        };
+
         let output =
             unsafe { slice::from_raw_parts_mut(buffer as *mut u8, bytes_to_read as usize) };
-        let count = output.len().min(report.len());
-        output[..count].copy_from_slice(&report[..count]);
-
-        if should_log_high_frequency(read_index) {
-            debug_line(&format!(
-                "[crosspuck] replay disabled; idle read #{} requested={} returned={}",
-                read_index, bytes_to_read, count
-            ));
-        }
-
-        if !bytes_read.is_null() {
-            unsafe {
-                *bytes_read = count as u32;
+        match guard.read_next_blocking(output) {
+            Ok(count) => {
+                let read_index = REPLAY_READ_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_log_high_frequency(read_index) {
+                    debug_line(&format!(
+                        "[crosspuck] recognition read #{} requested={} returned={}",
+                        read_index, bytes_to_read, count
+                    ));
+                }
+                if !bytes_read.is_null() {
+                    unsafe {
+                        *bytes_read = count as u32;
+                    }
+                }
+                TRUE
+            }
+            Err(error) => {
+                debug_line(&format!("[crosspuck] recognition read failed: {error}"));
+                if !bytes_read.is_null() {
+                    unsafe {
+                        *bytes_read = 0;
+                    }
+                }
+                FALSE
             }
         }
-        TRUE
+    }
+
+    fn read_recognition_report_ready(
+        buffer: *mut c_void,
+        bytes_to_read: u32,
+    ) -> Result<Option<usize>, ()> {
+        let Some(player) = RECOGNITION_PLAYER.get() else {
+            return Err(());
+        };
+
+        read_player_report_ready("recognition", player, buffer, bytes_to_read)
+    }
+
+    fn read_player_report_ready(
+        label: &str,
+        player: &Mutex<ReplayPlayer>,
+        buffer: *mut c_void,
+        bytes_to_read: u32,
+    ) -> Result<Option<usize>, ()> {
+        let mut guard = player.lock().map_err(|_| ())?;
+        let output =
+            unsafe { slice::from_raw_parts_mut(buffer as *mut u8, bytes_to_read as usize) };
+        match guard.read_next_ready(output) {
+            Ok(Some(count)) => {
+                let read_index = REPLAY_READ_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_log_high_frequency(read_index) {
+                    debug_line(&format!(
+                        "[crosspuck] {label} ready read #{} requested={} returned={}",
+                        read_index, bytes_to_read, count
+                    ));
+                }
+                Ok(Some(count))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => {
+                debug_line(&format!("[crosspuck] {label} ready read failed: {error}"));
+                Err(())
+            }
+        }
     }
 
     fn should_claim_path(path: &str) -> bool {
@@ -2780,6 +3243,12 @@ mod windows_proxy {
             || (lower.contains("vid_28de") && lower.contains("pid_1304") && lower.contains("col02"))
         {
             VirtualHidProfile::VendorDongle
+        } else if lower.contains("mi_03") {
+            VirtualHidProfile::Interface3
+        } else if lower.contains("mi_04") {
+            VirtualHidProfile::Interface4
+        } else if lower.contains("mi_05") {
+            VirtualHidProfile::Interface5
         } else {
             VirtualHidProfile::Main
         }
@@ -2788,6 +3257,12 @@ mod windows_proxy {
     fn virtual_profile_for_handle(handle: HANDLE) -> Option<VirtualHidProfile> {
         if handle == VirtualHidProfile::Main.handle() {
             Some(VirtualHidProfile::Main)
+        } else if handle == VirtualHidProfile::Interface3.handle() {
+            Some(VirtualHidProfile::Interface3)
+        } else if handle == VirtualHidProfile::Interface4.handle() {
+            Some(VirtualHidProfile::Interface4)
+        } else if handle == VirtualHidProfile::Interface5.handle() {
+            Some(VirtualHidProfile::Interface5)
         } else if handle == VirtualHidProfile::VendorDongle.handle() {
             Some(VirtualHidProfile::VendorDongle)
         } else {
@@ -2824,9 +3299,7 @@ mod windows_proxy {
     }
 
     fn active_virtual_session() -> bool {
-        MAIN_OPEN_COUNT.load(Ordering::Relaxed) > 0
-            || VENDOR_OPEN_COUNT.load(Ordering::Relaxed) > 0
-            || REPLAY_READ_COUNT.load(Ordering::Relaxed) > 0
+        virtual_profiles_open_count() > 0 || REPLAY_READ_COUNT.load(Ordering::Relaxed) > 0
     }
 
     fn disconnect_virtual_stream(reason: &str) {
@@ -2841,20 +3314,22 @@ mod windows_proxy {
         VIRTUAL_STREAM_CONNECTED.store(false, Ordering::Relaxed);
     }
 
-    fn disconnect_virtual_stream_after_idle_budget(read_index: usize, max_reports: usize) {
-        if VIRTUAL_STREAM_CONNECTED.swap(false, Ordering::Relaxed) {
-            debug_line(&format!(
-                "[crosspuck] virtual stream disconnected after idle read budget exhausted read_index={} max_reports={}",
-                read_index, max_reports
-            ));
-        }
-    }
-
     fn virtual_open_count(profile: VirtualHidProfile) -> &'static AtomicUsize {
         match profile {
             VirtualHidProfile::Main => &MAIN_OPEN_COUNT,
+            VirtualHidProfile::Interface3 => &IF3_OPEN_COUNT,
+            VirtualHidProfile::Interface4 => &IF4_OPEN_COUNT,
+            VirtualHidProfile::Interface5 => &IF5_OPEN_COUNT,
             VirtualHidProfile::VendorDongle => &VENDOR_OPEN_COUNT,
         }
+    }
+
+    fn virtual_profiles_open_count() -> usize {
+        MAIN_OPEN_COUNT.load(Ordering::Relaxed)
+            + IF3_OPEN_COUNT.load(Ordering::Relaxed)
+            + IF4_OPEN_COUNT.load(Ordering::Relaxed)
+            + IF5_OPEN_COUNT.load(Ordering::Relaxed)
+            + VENDOR_OPEN_COUNT.load(Ordering::Relaxed)
     }
 
     fn virtual_profile_for_preparsed_data(
@@ -2862,6 +3337,12 @@ mod windows_proxy {
     ) -> Option<VirtualHidProfile> {
         if preparsed_data == VirtualHidProfile::Main.preparsed_data() {
             Some(VirtualHidProfile::Main)
+        } else if preparsed_data == VirtualHidProfile::Interface3.preparsed_data() {
+            Some(VirtualHidProfile::Interface3)
+        } else if preparsed_data == VirtualHidProfile::Interface4.preparsed_data() {
+            Some(VirtualHidProfile::Interface4)
+        } else if preparsed_data == VirtualHidProfile::Interface5.preparsed_data() {
+            Some(VirtualHidProfile::Interface5)
         } else if preparsed_data == VirtualHidProfile::VendorDongle.preparsed_data() {
             Some(VirtualHidProfile::VendorDongle)
         } else {
@@ -2878,11 +3359,16 @@ mod windows_proxy {
             || lower.contains("up:ff00_u:0002")
         {
             Some(VirtualHidProfile::VendorDongle)
+        } else if lower.contains("vid_28de&pid_1304&mi_03") {
+            Some(VirtualHidProfile::Interface3)
+        } else if lower.contains("vid_28de&pid_1304&mi_04") {
+            Some(VirtualHidProfile::Interface4)
+        } else if lower.contains("vid_28de&pid_1304&mi_05") {
+            Some(VirtualHidProfile::Interface5)
         } else if lower.contains("vid_845e&pid_0001")
             || lower.contains("vid_28de&pid_1304&mi_02")
-            || lower.contains("vid_28de&pid_1304") && lower.contains("col04")
-            || lower.contains("hid_device_up:ff00_u:0001")
-            || lower.contains("up:ff00_u:0001")
+            || lower.contains("hid_device_up:0001_u:0001")
+            || lower.contains("up:0001_u:0001")
         {
             Some(VirtualHidProfile::Main)
         } else {
@@ -2963,10 +3449,82 @@ mod windows_proxy {
 
     fn device_instance_id_value(profile: VirtualHidProfile) -> &'static str {
         match profile {
-            VirtualHidProfile::Main => r"HID\VID_28DE&PID_1304&MI_02&COL04\FXB9961303C9C&0&0001",
-            VirtualHidProfile::VendorDongle => {
-                r"HID\VID_28DE&PID_1304&MI_06&COL02\FXB9961303C9C&0&0002"
+            VirtualHidProfile::Main => r"HID\VID_28DE&PID_1304&MI_02&COL01\FXB9961303C9C&0&0001",
+            VirtualHidProfile::Interface3 => {
+                r"HID\VID_28DE&PID_1304&MI_03&COL01\FXB9961303C9C&0&0002"
             }
+            VirtualHidProfile::Interface4 => {
+                r"HID\VID_28DE&PID_1304&MI_04&COL01\FXB9961303C9C&0&0003"
+            }
+            VirtualHidProfile::Interface5 => {
+                r"HID\VID_28DE&PID_1304&MI_05&COL01\FXB9961303C9C&0&0004"
+            }
+            VirtualHidProfile::VendorDongle => {
+                r"HID\VID_28DE&PID_1304&MI_06&COL02\FXB9961303C9C&0&0005"
+            }
+        }
+    }
+
+    fn hardware_id_entries(profile: VirtualHidProfile) -> Vec<&'static str> {
+        match profile {
+            VirtualHidProfile::Main => vec![
+                r"HID\VID_28DE&PID_1304&MI_02&COL01",
+                r"HID\VID_28DE&PID_1304&MI_02",
+                r"HID\VID_28DE&PID_1304",
+                r"HID\VID_28DE&UP:0001_U:0001",
+                r"HID_DEVICE_UP:0001_U:0001",
+                r"HID_DEVICE",
+            ],
+            VirtualHidProfile::Interface3 => vec![
+                r"HID\VID_28DE&PID_1304&MI_03&COL01",
+                r"HID\VID_28DE&PID_1304&MI_03",
+                r"HID\VID_28DE&PID_1304",
+                r"HID\VID_28DE&UP:0001_U:0001",
+                r"HID_DEVICE_UP:0001_U:0001",
+                r"HID_DEVICE",
+            ],
+            VirtualHidProfile::Interface4 => vec![
+                r"HID\VID_28DE&PID_1304&MI_04&COL01",
+                r"HID\VID_28DE&PID_1304&MI_04",
+                r"HID\VID_28DE&PID_1304",
+                r"HID\VID_28DE&UP:0001_U:0001",
+                r"HID_DEVICE_UP:0001_U:0001",
+                r"HID_DEVICE",
+            ],
+            VirtualHidProfile::Interface5 => vec![
+                r"HID\VID_28DE&PID_1304&MI_05&COL01",
+                r"HID\VID_28DE&PID_1304&MI_05",
+                r"HID\VID_28DE&PID_1304",
+                r"HID\VID_28DE&UP:0001_U:0001",
+                r"HID_DEVICE_UP:0001_U:0001",
+                r"HID_DEVICE",
+            ],
+            VirtualHidProfile::VendorDongle => vec![
+                r"HID\VID_28DE&PID_1304&MI_06&COL02",
+                r"HID\VID_28DE&PID_1304&MI_06",
+                r"HID\VID_28DE&PID_1304",
+                r"HID\VID_28DE&UP:FF00_U:0002",
+                r"HID_DEVICE_UP:FF00_U:0002",
+                r"HID_DEVICE",
+            ],
+        }
+    }
+
+    fn compatible_id_entries(profile: VirtualHidProfile) -> Vec<&'static str> {
+        if profile == VirtualHidProfile::VendorDongle {
+            vec![r"HID_DEVICE_UP:FF00_U:0002", r"HID_DEVICE"]
+        } else {
+            vec![r"HID_DEVICE_UP:0001_U:0001", r"HID_DEVICE"]
+        }
+    }
+
+    fn location_path_entry(profile: VirtualHidProfile) -> &'static str {
+        match profile {
+            VirtualHidProfile::Main => r"USBROOT(0)#USB(1)#USBMI(2)#HID(1)",
+            VirtualHidProfile::Interface3 => r"USBROOT(0)#USB(1)#USBMI(3)#HID(1)",
+            VirtualHidProfile::Interface4 => r"USBROOT(0)#USB(1)#USBMI(4)#HID(1)",
+            VirtualHidProfile::Interface5 => r"USBROOT(0)#USB(1)#USBMI(5)#HID(1)",
+            VirtualHidProfile::VendorDongle => r"USBROOT(0)#USB(1)#USBMI(6)#HID(1)",
         }
     }
 
@@ -2994,42 +3552,15 @@ mod windows_proxy {
             },
             SPDRP_HARDWAREID => RegistryValue {
                 reg_type: REG_MULTI_SZ,
-                entries: match profile {
-                    VirtualHidProfile::Main => vec![
-                        r"HID\VID_28DE&PID_1304&MI_02&COL04",
-                        r"HID\VID_28DE&PID_1304&MI_02",
-                        r"HID\VID_28DE&PID_1304",
-                        r"HID\VID_28DE&UP:FF00_U:0001",
-                        r"HID_DEVICE_UP:FF00_U:0001",
-                        r"HID_DEVICE",
-                    ],
-                    VirtualHidProfile::VendorDongle => vec![
-                        r"HID\VID_28DE&PID_1304&MI_06&COL02",
-                        r"HID\VID_28DE&PID_1304&MI_06",
-                        r"HID\VID_28DE&PID_1304",
-                        r"HID\VID_28DE&UP:FF00_U:0002",
-                        r"HID_DEVICE_UP:FF00_U:0002",
-                        r"HID_DEVICE",
-                    ],
-                },
+                entries: hardware_id_entries(profile),
             },
             SPDRP_COMPATIBLEIDS => RegistryValue {
                 reg_type: REG_MULTI_SZ,
-                entries: match profile {
-                    VirtualHidProfile::Main => {
-                        vec![r"HID_DEVICE_UP:FF00_U:0001", r"HID_DEVICE"]
-                    }
-                    VirtualHidProfile::VendorDongle => {
-                        vec![r"HID_DEVICE_UP:FF00_U:0002", r"HID_DEVICE"]
-                    }
-                },
+                entries: compatible_id_entries(profile),
             },
             SPDRP_LOCATION_PATHS => RegistryValue {
                 reg_type: REG_MULTI_SZ,
-                entries: vec![match profile {
-                    VirtualHidProfile::Main => r"USBROOT(0)#USB(1)#USBMI(2)#HID(3)",
-                    VirtualHidProfile::VendorDongle => r"USBROOT(0)#USB(1)#USBMI(6)#HID(1)",
-                }],
+                entries: vec![location_path_entry(profile)],
             },
             _ => return None,
         };
@@ -3077,44 +3608,17 @@ mod windows_proxy {
         } else if devpropkey_eq(key, &DEVPKEY_DEVICE_HARDWARE_IDS) {
             DevicePropertyValue {
                 prop_type: DEVPROP_TYPE_STRING_LIST,
-                entries: match profile {
-                    VirtualHidProfile::Main => vec![
-                        r"HID\VID_28DE&PID_1304&MI_02&COL04",
-                        r"HID\VID_28DE&PID_1304&MI_02",
-                        r"HID\VID_28DE&PID_1304",
-                        r"HID\VID_28DE&UP:FF00_U:0001",
-                        r"HID_DEVICE_UP:FF00_U:0001",
-                        r"HID_DEVICE",
-                    ],
-                    VirtualHidProfile::VendorDongle => vec![
-                        r"HID\VID_28DE&PID_1304&MI_06&COL02",
-                        r"HID\VID_28DE&PID_1304&MI_06",
-                        r"HID\VID_28DE&PID_1304",
-                        r"HID\VID_28DE&UP:FF00_U:0002",
-                        r"HID_DEVICE_UP:FF00_U:0002",
-                        r"HID_DEVICE",
-                    ],
-                },
+                entries: hardware_id_entries(profile),
             }
         } else if devpropkey_eq(key, &DEVPKEY_DEVICE_COMPATIBLE_IDS) {
             DevicePropertyValue {
                 prop_type: DEVPROP_TYPE_STRING_LIST,
-                entries: match profile {
-                    VirtualHidProfile::Main => {
-                        vec![r"HID_DEVICE_UP:FF00_U:0001", r"HID_DEVICE"]
-                    }
-                    VirtualHidProfile::VendorDongle => {
-                        vec![r"HID_DEVICE_UP:FF00_U:0002", r"HID_DEVICE"]
-                    }
-                },
+                entries: compatible_id_entries(profile),
             }
         } else if devpropkey_eq(key, &DEVPKEY_DEVICE_LOCATION_PATHS) {
             DevicePropertyValue {
                 prop_type: DEVPROP_TYPE_STRING_LIST,
-                entries: vec![match profile {
-                    VirtualHidProfile::Main => r"USBROOT(0)#USB(1)#USBMI(2)#HID(3)",
-                    VirtualHidProfile::VendorDongle => r"USBROOT(0)#USB(1)#USBMI(6)#HID(1)",
-                }],
+                entries: vec![location_path_entry(profile)],
             }
         } else {
             return None;
@@ -3857,6 +4361,215 @@ mod windows_proxy {
             .is_ok_and(|guard| guard.contains(&device_value))
     }
 
+    fn virtual_profile_for_fake_sdl_device(device: *mut c_void) -> Option<VirtualHidProfile> {
+        let value = device as HANDLE;
+        virtual_profile_for_handle(value)
+    }
+
+    unsafe fn should_augment_sdl_hid_enumeration(vendor_id: u16, product_id: u16) -> bool {
+        (vendor_id == 0 || vendor_id == VIRTUAL_VENDOR_ID)
+            && (product_id == 0 || product_id == VIRTUAL_PRODUCT_ID)
+    }
+
+    unsafe fn augment_sdl_hid_enumeration(head: *mut SdlHidDeviceInfo) -> *mut SdlHidDeviceInfo {
+        let mut seen_main = false;
+        let mut seen_vendor = false;
+        let mut tail = ptr::null_mut();
+        let mut cursor = head;
+        while !cursor.is_null() {
+            tail = cursor;
+            let path = narrow_z_to_string((*cursor).path as PCSTR).unwrap_or_default();
+            if path.to_ascii_lowercase().contains("vid_845e&pid_0001") {
+                rewrite_sdl_hid_device_info(cursor, VirtualHidProfile::Main);
+                seen_main = true;
+            } else if path.to_ascii_lowercase().contains("vid_845e&pid_0002") {
+                rewrite_sdl_hid_device_info(cursor, VirtualHidProfile::VendorDongle);
+                seen_vendor = true;
+            } else if let Some(profile) = virtual_profile_from_text(&path) {
+                if profile == VirtualHidProfile::Main {
+                    seen_main = true;
+                } else if profile == VirtualHidProfile::VendorDongle {
+                    seen_vendor = true;
+                }
+            }
+            cursor = (*cursor).next;
+        }
+
+        let mut missing_profiles = Vec::new();
+        if !seen_main {
+            missing_profiles.push(VirtualHidProfile::Main);
+        }
+        if !seen_vendor {
+            missing_profiles.push(VirtualHidProfile::VendorDongle);
+        }
+        missing_profiles.extend([
+            VirtualHidProfile::Interface3,
+            VirtualHidProfile::Interface4,
+            VirtualHidProfile::Interface5,
+        ]);
+
+        let synthetic_head = build_sdl_hid_info_list(&missing_profiles);
+        let result = if head.is_null() {
+            synthetic_head
+        } else {
+            if !tail.is_null() {
+                (*tail).next = synthetic_head;
+            }
+            head
+        };
+
+        remember_augmented_sdl_enumeration(result);
+        result
+    }
+
+    unsafe fn rewrite_sdl_hid_device_info(
+        device_info: *mut SdlHidDeviceInfo,
+        profile: VirtualHidProfile,
+    ) {
+        if device_info.is_null() {
+            return;
+        }
+
+        (*device_info).path = leak_c_string(&virtual_device_path(profile));
+        (*device_info).vendor_id = VIRTUAL_VENDOR_ID;
+        (*device_info).product_id = VIRTUAL_PRODUCT_ID;
+        (*device_info).serial_number = leak_wide_string(VIRTUAL_SERIAL);
+        (*device_info).release_number = VIRTUAL_VERSION_NUMBER;
+        (*device_info).manufacturer_string = leak_wide_string(VIRTUAL_MANUFACTURER);
+        (*device_info).product_string = leak_wide_string(VIRTUAL_PRODUCT);
+        (*device_info).usage_page = profile.caps().usage_page;
+        (*device_info).usage = profile.caps().usage;
+        (*device_info).interface_number = profile.interface_number() as c_int;
+        (*device_info).interface_class = 0;
+        (*device_info).interface_subclass = 0;
+        (*device_info).interface_protocol = 0;
+        (*device_info).bus_type = 1;
+        debug_line(&format!(
+            "[crosspuck] SDL_hid_enumerate rewrite profile={} path={:?}",
+            profile.label(),
+            virtual_device_path(profile)
+        ));
+    }
+
+    unsafe fn build_sdl_hid_info_list(profiles: &[VirtualHidProfile]) -> *mut SdlHidDeviceInfo {
+        let mut head: *mut SdlHidDeviceInfo = ptr::null_mut();
+        let mut tail: *mut SdlHidDeviceInfo = ptr::null_mut();
+        for profile in profiles.iter().copied() {
+            let node = Box::into_raw(Box::new(SdlHidDeviceInfo {
+                path: leak_c_string(&virtual_device_path(profile)),
+                vendor_id: VIRTUAL_VENDOR_ID,
+                product_id: VIRTUAL_PRODUCT_ID,
+                serial_number: leak_wide_string(VIRTUAL_SERIAL),
+                release_number: VIRTUAL_VERSION_NUMBER,
+                manufacturer_string: leak_wide_string(VIRTUAL_MANUFACTURER),
+                product_string: leak_wide_string(VIRTUAL_PRODUCT),
+                usage_page: profile.caps().usage_page,
+                usage: profile.caps().usage,
+                interface_number: profile.interface_number() as c_int,
+                interface_class: 0,
+                interface_subclass: 0,
+                interface_protocol: 0,
+                bus_type: 1,
+                next: ptr::null_mut(),
+            }));
+
+            if head.is_null() {
+                head = node;
+            } else {
+                (*tail).next = node;
+            }
+            tail = node;
+            debug_line(&format!(
+                "[crosspuck] SDL_hid_enumerate append synthetic profile={} path={:?}",
+                profile.label(),
+                virtual_device_path(profile)
+            ));
+        }
+        head
+    }
+
+    fn leak_c_string(value: &str) -> *mut c_char {
+        CString::new(value).unwrap_or_default().into_raw()
+    }
+
+    fn leak_wide_string(value: &str) -> *mut u16 {
+        let mut units = value.encode_utf16().collect::<Vec<_>>();
+        units.push(0);
+        Box::leak(units.into_boxed_slice()).as_mut_ptr()
+    }
+
+    fn remember_augmented_sdl_enumeration(head: *mut SdlHidDeviceInfo) {
+        if head.is_null() {
+            return;
+        }
+        let heads = SDL_AUGMENTED_ENUMERATIONS.get_or_init(|| Mutex::new(Vec::new()));
+        if let Ok(mut guard) = heads.lock() {
+            let value = head as usize;
+            if !guard.contains(&value) {
+                guard.push(value);
+            }
+        }
+    }
+
+    fn is_augmented_sdl_enumeration(head: *mut SdlHidDeviceInfo) -> bool {
+        let Some(heads) = SDL_AUGMENTED_ENUMERATIONS.get() else {
+            return false;
+        };
+        let value = head as usize;
+        heads.lock().is_ok_and(|guard| guard.contains(&value))
+    }
+
+    unsafe fn remember_sdl_feature_command(device: *mut c_void, data: *const u8, len: usize) {
+        if device.is_null() || data.is_null() || len < 2 {
+            return;
+        }
+
+        let Some(profile) = virtual_profile_for_fake_sdl_device(device) else {
+            return;
+        };
+        let device_value = device as usize;
+        let report_id = *data;
+        let command = *data.add(1);
+        let request_value = if len > 3 { *data.add(3) } else { 0 };
+        let commands = SDL_FEATURE_COMMANDS.get_or_init(|| Mutex::new(Vec::new()));
+        if let Ok(mut guard) = commands.lock() {
+            if let Some(existing) = guard
+                .iter_mut()
+                .find(|tracked| tracked.device == device_value && tracked.report_id == report_id)
+            {
+                existing.command = command;
+                existing.request_value = request_value;
+            } else {
+                guard.push(SdlFeatureCommand {
+                    device: device_value,
+                    report_id,
+                    command,
+                    request_value,
+                });
+            }
+        }
+
+        if let Some(response) =
+            input_report_response_for_feature_command(profile, report_id, command, request_value)
+        {
+            queue_pending_input_report(device_value, response);
+        }
+    }
+
+    fn last_sdl_feature_command(device: *mut c_void, report_id: u8) -> Option<SdlFeatureCommand> {
+        let Some(commands) = SDL_FEATURE_COMMANDS.get() else {
+            return None;
+        };
+        let device_value = device as usize;
+        commands.lock().ok().and_then(|guard| {
+            guard
+                .iter()
+                .rev()
+                .find(|tracked| tracked.device == device_value && tracked.report_id == report_id)
+                .cloned()
+        })
+    }
+
     unsafe fn synthesize_sdl_feature_report(
         api: &str,
         device: *mut c_void,
@@ -3868,13 +4581,198 @@ mod windows_proxy {
         }
 
         let report_id = *data;
+        let command = last_sdl_feature_command(device, report_id);
         ptr::write_bytes(data, 0, len);
-        *data = report_id;
+        let profile = virtual_profile_for_fake_sdl_device(device);
+        let response =
+            profile.and_then(|profile| sdl_feature_response(profile, report_id, command.as_ref()));
+        let response_len = response
+            .as_ref()
+            .map(|bytes| copy_sdl_feature_response(data, len, bytes))
+            .unwrap_or_else(|| {
+                *data = report_id;
+                len
+            });
+        let command_text = command
+            .as_ref()
+            .map(|value| format!("0x{:02X}/0x{:02X}", value.command, value.request_value))
+            .unwrap_or_else(|| "-".to_string());
         log_hidd_report_call(&format!(
-            "[crosspuck] {api} virtual device={device:p} len={} report_id=0x{report_id:02X}",
-            len
+            "[crosspuck] {api} virtual device={device:p} len={} report_id=0x{report_id:02X} command={} synthesized={} response_head={}",
+            len,
+            command_text,
+            response.is_some(),
+            hex_head(data as *const u8, response_len.min(16) as u32)
         ));
-        len.min(c_int::MAX as usize) as c_int
+        response_len.min(c_int::MAX as usize) as c_int
+    }
+
+    fn sdl_feature_response(
+        profile: VirtualHidProfile,
+        report_id: u8,
+        command: Option<&SdlFeatureCommand>,
+    ) -> Option<Vec<u8>> {
+        if !profile.is_active_controller_slot() {
+            return match (profile, report_id, command.map(|value| value.command)) {
+                (VirtualHidProfile::VendorDongle, 0x02, Some(0xB4)) => {
+                    Some(dongle_wireless_state_response())
+                }
+                _ => None,
+            };
+        }
+
+        match (report_id, command.map(|value| value.command)) {
+            (0x02, Some(0xA3)) => Some(triton_controller_info_response(0x02)),
+            (0x02, Some(0xB4)) => Some(dongle_wireless_state_response()),
+            (0x02, Some(0x83)) => Some(triton_attributes_response(0x02)),
+            (0x02, Some(0xAE)) => Some(triton_string_attribute_response(
+                0x02,
+                command.map(|value| value.request_value).unwrap_or(1),
+            )),
+            (0x01, Some(0x83)) => Some(triton_attributes_response(0x01)),
+            (0x01, Some(0xAE)) => Some(triton_string_attribute_response(
+                0x01,
+                command.map(|value| value.request_value).unwrap_or(1),
+            )),
+            (0x01, Some(0xA3)) => Some(triton_controller_info_response(0x01)),
+            _ => None,
+        }
+    }
+
+    fn input_report_response_for_feature_command(
+        profile: VirtualHidProfile,
+        report_id: u8,
+        command: u8,
+        request_value: u8,
+    ) -> Option<Vec<u8>> {
+        if !profile.is_active_controller_slot() {
+            return None;
+        }
+
+        match (report_id, command) {
+            (0x01, 0xAE) => Some(triton_string_attribute_input_response(request_value)),
+            _ => None,
+        }
+    }
+
+    fn queue_pending_input_report(device: usize, report: Vec<u8>) {
+        let head = unsafe { hex_head(report.as_ptr(), report.len().min(16) as u32) };
+        let queue = PENDING_INPUT_REPORTS.get_or_init(|| Mutex::new(VecDeque::new()));
+        if let Ok(mut guard) = queue.lock() {
+            guard.push_back(PendingInputReport { device, report });
+            debug_line(&format!(
+                "[crosspuck] queued pending input report device=0x{device:X} count={} head={head}",
+                guard
+                    .iter()
+                    .filter(|pending| pending.device == device)
+                    .count()
+            ));
+        }
+    }
+
+    fn dongle_wireless_state_response() -> Vec<u8> {
+        let mut response = vec![0x02, 0xB4, 0x01, 0x02];
+        response.resize(64, 0);
+        response
+    }
+
+    fn triton_controller_info_response(report_id: u8) -> Vec<u8> {
+        let mut response = vec![
+            report_id, 0xA3, 0x18, 0x26, 0xAB, 0x01, 0x71, 0x80, 0xC0, 0x7A, 0x09, b'F', b'X',
+            b'A', b'9', b'9', b'6', b'1', b'3', b'0', b'2', b'5', b'0', b'B',
+        ];
+        response.resize(64, 0);
+        response
+    }
+
+    fn triton_string_attribute_response(report_id: u8, attribute_tag: u8) -> Vec<u8> {
+        const ATTRIB_STR_BOARD_SERIAL: u8 = 0;
+        const ATTRIB_STR_UNIT_SERIAL: u8 = 1;
+        const TRITON_SERIAL: &[u8] = b"FXA996130250B";
+
+        let attribute_value = match attribute_tag {
+            ATTRIB_STR_BOARD_SERIAL | ATTRIB_STR_UNIT_SERIAL => TRITON_SERIAL,
+            _ => TRITON_SERIAL,
+        };
+        let mut response = Vec::with_capacity(24);
+        response.push(report_id);
+        response.push(0xAE);
+        response.push(21);
+        response.push(attribute_tag);
+        let mut value = [0_u8; 20];
+        let count = value.len().min(attribute_value.len());
+        value[..count].copy_from_slice(&attribute_value[..count]);
+        response.extend_from_slice(&value);
+        response
+    }
+
+    fn triton_string_attribute_input_response(attribute_tag: u8) -> Vec<u8> {
+        const ATTRIB_STR_BOARD_SERIAL: u8 = 0;
+        const ATTRIB_STR_UNIT_SERIAL: u8 = 1;
+        const TRITON_SERIAL: &[u8] = b"FXA996130250B";
+
+        let attribute_value = match attribute_tag {
+            ATTRIB_STR_BOARD_SERIAL | ATTRIB_STR_UNIT_SERIAL => TRITON_SERIAL,
+            _ => TRITON_SERIAL,
+        };
+
+        let mut response = Vec::with_capacity(54);
+        response.push(0xAE);
+        response.push(21);
+        response.push(attribute_tag);
+        let mut value = [0_u8; 20];
+        let count = value.len().min(attribute_value.len());
+        value[..count].copy_from_slice(&attribute_value[..count]);
+        response.extend_from_slice(&value);
+        response.resize(54, 0);
+        response
+    }
+
+    fn triton_attributes_response(report_id: u8) -> Vec<u8> {
+        const ATTRIB_UNIQUE_ID: u8 = 0;
+        const ATTRIB_PRODUCT_ID: u8 = 1;
+        const ATTRIB_CAPABILITIES: u8 = 2;
+        const ATTRIB_FIRMWARE_VERSION: u8 = 3;
+        const ATTRIB_FIRMWARE_BUILD_TIME: u8 = 4;
+        const ATTRIB_RADIO_FIRMWARE_BUILD_TIME: u8 = 5;
+        const ATTRIB_RADIO_DEVICE_ID0: u8 = 6;
+        const ATTRIB_RADIO_DEVICE_ID1: u8 = 7;
+        const ATTRIB_DONGLE_FIRMWARE_BUILD_TIME: u8 = 8;
+        const ATTRIB_BOARD_REVISION: u8 = 9;
+        const ATTRIB_BOOTLOADER_BUILD_TIME: u8 = 10;
+        const ATTRIB_CONNECTION_INTERVAL_IN_US: u8 = 11;
+
+        let attributes: [(u8, u32); 12] = [
+            (ATTRIB_UNIQUE_ID, 0x7101_AB26),
+            (ATTRIB_PRODUCT_ID, 0x0000_1302),
+            (ATTRIB_CAPABILITIES, 0x4160_BFFF),
+            (ATTRIB_FIRMWARE_VERSION, 0x6A10_91CE),
+            (ATTRIB_FIRMWARE_BUILD_TIME, 0x6A10_91CE),
+            (ATTRIB_RADIO_FIRMWARE_BUILD_TIME, 0x0000_0000),
+            (ATTRIB_RADIO_DEVICE_ID0, 0x7101_AB26),
+            (ATTRIB_RADIO_DEVICE_ID1, 0x097A_C080),
+            (ATTRIB_DONGLE_FIRMWARE_BUILD_TIME, 0x6A10_91CF),
+            (ATTRIB_BOARD_REVISION, 48),
+            (ATTRIB_BOOTLOADER_BUILD_TIME, 0x0000_0000),
+            (ATTRIB_CONNECTION_INTERVAL_IN_US, 4_000),
+        ];
+
+        let mut response = Vec::with_capacity(64);
+        response.push(report_id);
+        response.push(0x83);
+        response.push((attributes.len() * 5) as u8);
+        for (tag, value) in attributes {
+            response.push(tag);
+            response.extend_from_slice(&value.to_le_bytes());
+        }
+        response.resize(64, 0);
+        response
+    }
+
+    unsafe fn copy_sdl_feature_response(data: *mut u8, len: usize, response: &[u8]) -> usize {
+        let count = len.min(response.len());
+        ptr::copy_nonoverlapping(response.as_ptr(), data, count);
+        count
     }
 
     unsafe fn maybe_disconnect_on_controller_log_write(
@@ -3956,6 +4854,129 @@ mod windows_proxy {
             || lower.contains("gamepad")
     }
 
+    fn hid_interface_guid() -> GUID {
+        GUID {
+            data1: 0x4D1E55B2,
+            data2: 0xF16F,
+            data3: 0x11CF,
+            data4: [0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30],
+        }
+    }
+
+    fn guid_eq(left: &GUID, right: &GUID) -> bool {
+        left.data1 == right.data1
+            && left.data2 == right.data2
+            && left.data3 == right.data3
+            && left.data4 == right.data4
+    }
+
+    fn is_hid_interface_guid(guid: *const GUID) -> bool {
+        let Some(guid) = (unsafe { guid.as_ref() }) else {
+            return false;
+        };
+        guid_eq(guid, &hid_interface_guid())
+    }
+
+    fn synthetic_profile_for_failed_member_index(
+        device_info_set: HANDLE,
+        member_index: u32,
+    ) -> Option<VirtualHidProfile> {
+        let base = synthetic_enum_base_index(device_info_set, member_index);
+        let profiles: &[VirtualHidProfile] = if base == 0 {
+            &[
+                VirtualHidProfile::Main,
+                VirtualHidProfile::VendorDongle,
+                VirtualHidProfile::Interface3,
+                VirtualHidProfile::Interface4,
+                VirtualHidProfile::Interface5,
+            ]
+        } else if base == 1 {
+            &[
+                VirtualHidProfile::VendorDongle,
+                VirtualHidProfile::Interface3,
+                VirtualHidProfile::Interface4,
+                VirtualHidProfile::Interface5,
+            ]
+        } else {
+            &[
+                VirtualHidProfile::Interface3,
+                VirtualHidProfile::Interface4,
+                VirtualHidProfile::Interface5,
+            ]
+        };
+        let offset = member_index.checked_sub(base)? as usize;
+        profiles.get(offset).copied()
+    }
+
+    fn synthetic_enum_base_index(device_info_set: HANDLE, member_index: u32) -> u32 {
+        let set_value = device_info_set as usize;
+        let mut guard = match SYNTHETIC_ENUM_BASES
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+        {
+            Ok(guard) => guard,
+            Err(_) => return member_index,
+        };
+
+        if let Some((_, base)) = guard
+            .iter()
+            .find(|(stored_set, _)| *stored_set == set_value)
+        {
+            return *base;
+        }
+
+        guard.push((set_value, member_index));
+        member_index
+    }
+
+    fn virtual_profile_for_interface_reserved(reserved: usize) -> Option<VirtualHidProfile> {
+        if reserved & 0xFFFF_FFFF_FFFF_0000 != VIRTUAL_INTERFACE_RESERVED_BASE {
+            return None;
+        }
+
+        match (reserved & 0xFFFF) as u8 {
+            2 => Some(VirtualHidProfile::Main),
+            3 => Some(VirtualHidProfile::Interface3),
+            4 => Some(VirtualHidProfile::Interface4),
+            5 => Some(VirtualHidProfile::Interface5),
+            6 => Some(VirtualHidProfile::VendorDongle),
+            _ => None,
+        }
+    }
+
+    unsafe fn virtual_profile_for_device_interface_data(
+        device_interface_data: *mut c_void,
+    ) -> Option<VirtualHidProfile> {
+        if device_interface_data.is_null() {
+            return None;
+        }
+
+        let data = &*(device_interface_data as *const SpDeviceInterfaceData);
+        virtual_profile_for_interface_reserved(data.reserved)
+    }
+
+    unsafe fn write_synthetic_device_interface_data(
+        device_interface_data: *mut c_void,
+        interface_class_guid: *const GUID,
+        profile: VirtualHidProfile,
+    ) -> bool {
+        if device_interface_data.is_null() {
+            return false;
+        }
+
+        let data = &mut *(device_interface_data as *mut SpDeviceInterfaceData);
+        if data.cb_size == 0 {
+            data.cb_size = std::mem::size_of::<SpDeviceInterfaceData>() as u32;
+        }
+        data.interface_class_guid = interface_class_guid
+            .as_ref()
+            .copied()
+            .unwrap_or_else(hid_interface_guid);
+        data.flags = SPINT_ACTIVE;
+        data.reserved = profile.interface_reserved();
+        true
+    }
+
     unsafe fn proc_name_label(proc_name: PCSTR) -> String {
         if proc_name.is_null() {
             return "null".to_string();
@@ -3991,6 +5012,111 @@ mod windows_proxy {
         rendered
     }
 
+    unsafe fn synthesize_device_interface_detail_w(
+        profile: VirtualHidProfile,
+        device_interface_detail_data: *mut c_void,
+        device_interface_detail_data_size: u32,
+        required_size: *mut u32,
+        device_info_data: *mut c_void,
+    ) -> BOOL {
+        let path = virtual_device_path(profile);
+        let required = 4 + ((path.encode_utf16().count() + 1) * 2) as u32;
+        if !required_size.is_null() {
+            *required_size = required;
+        }
+        write_synthetic_device_info_data(device_info_data, profile, "SyntheticDetailW");
+
+        if device_interface_detail_data.is_null() || device_interface_detail_data_size < required {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetDeviceInterfaceDetailW synthetic needs larger buffer profile={} required={} size={} path={path:?}",
+                profile.label(),
+                required,
+                device_interface_detail_data_size
+            ));
+            return FALSE;
+        }
+
+        if write_detail_w_path(
+            device_interface_detail_data,
+            device_interface_detail_data_size,
+            &path,
+        ) {
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetDeviceInterfaceDetailW synthetic profile={} size={} required={} path={path:?}",
+                profile.label(),
+                device_interface_detail_data_size,
+                required
+            ));
+            TRUE
+        } else {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            FALSE
+        }
+    }
+
+    unsafe fn synthesize_device_interface_detail_a(
+        profile: VirtualHidProfile,
+        device_interface_detail_data: *mut c_void,
+        device_interface_detail_data_size: u32,
+        required_size: *mut u32,
+        device_info_data: *mut c_void,
+    ) -> BOOL {
+        let path = virtual_device_path(profile);
+        let required = 4 + path.len() as u32 + 1;
+        if !required_size.is_null() {
+            *required_size = required;
+        }
+        write_synthetic_device_info_data(device_info_data, profile, "SyntheticDetailA");
+
+        if device_interface_detail_data.is_null() || device_interface_detail_data_size < required {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetDeviceInterfaceDetailA synthetic needs larger buffer profile={} required={} size={} path={path:?}",
+                profile.label(),
+                required,
+                device_interface_detail_data_size
+            ));
+            return FALSE;
+        }
+
+        if write_detail_a_path(
+            device_interface_detail_data,
+            device_interface_detail_data_size,
+            &path,
+        ) {
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetDeviceInterfaceDetailA synthetic profile={} size={} required={} path={path:?}",
+                profile.label(),
+                device_interface_detail_data_size,
+                required
+            ));
+            TRUE
+        } else {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            FALSE
+        }
+    }
+
+    unsafe fn write_synthetic_device_info_data(
+        device_info_data: *mut c_void,
+        profile: VirtualHidProfile,
+        source: &str,
+    ) {
+        if device_info_data.is_null() {
+            return;
+        }
+
+        let data = &mut *(device_info_data as *mut SpDevinfoData);
+        if data.cb_size == 0 {
+            data.cb_size = std::mem::size_of::<SpDevinfoData>() as u32;
+        }
+        data.class_guid = hid_interface_guid();
+        data.dev_inst = profile.synthetic_devinst();
+        data.reserved = 0;
+        remember_virtual_devinst(data.dev_inst, profile, source);
+    }
+
     unsafe fn detail_w_path(detail: *mut c_void) -> Option<String> {
         if detail.is_null() {
             return None;
@@ -4023,12 +5149,27 @@ mod windows_proxy {
         let class_guid_start = lower.rfind("#{")?;
         let prefix = &path[..hid_start + "hid#".len()];
         let suffix = &path[class_guid_start..];
-        let instance = match profile {
-            VirtualHidProfile::Main => "mi_02&col04#fxb9961303c9c&0&0001",
-            VirtualHidProfile::VendorDongle => "mi_06&col02#fxb9961303c9c&0&0002",
-        };
+        let instance = virtual_path_instance(profile);
 
         Some(format!("{prefix}vid_28de&pid_1304&{instance}{suffix}"))
+    }
+
+    fn virtual_device_path(profile: VirtualHidProfile) -> String {
+        format!(
+            r"\\?\hid#vid_28de&pid_1304&{}#{}",
+            virtual_path_instance(profile),
+            HID_INTERFACE_GUID_STRING
+        )
+    }
+
+    fn virtual_path_instance(profile: VirtualHidProfile) -> String {
+        format!(
+            "mi_{:02x}&col{:02x}#{}&0&{:04x}",
+            profile.interface_number(),
+            profile.collection_number(),
+            VIRTUAL_SERIAL.to_ascii_lowercase(),
+            profile.instance_suffix()
+        )
     }
 
     unsafe fn write_detail_w_path(detail: *mut c_void, detail_size: u32, value: &str) -> bool {
