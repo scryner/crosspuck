@@ -1,0 +1,10 @@
+[package]
+name = "crosspuck-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared CrossPuck host HID, service state, and IPC primitives"
+
+[dependencies]
+hidapi.workspace = true
+serde.workspace = true

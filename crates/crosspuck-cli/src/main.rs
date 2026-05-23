@@ -1,3 +1,6 @@
+use crosspuck_core::hid::{
+    build_puck_snapshot, collect_candidates as collect_core_candidates, HidFilter,
+};
 use hidapi::{HidApi, HidDevice, HidError};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +26,7 @@ struct Config {
     usage_page: Option<u16>,
     usage: Option<u16>,
     path: Option<String>,
+    serial: Option<String>,
     read_size: usize,
     timeout_ms: i32,
     count: Option<u64>,
@@ -33,6 +37,7 @@ struct Config {
     quiet: bool,
     probe_all: bool,
     list_only: bool,
+    identity_json: bool,
 }
 
 impl Default for Config {
@@ -44,6 +49,7 @@ impl Default for Config {
             usage_page: None,
             usage: None,
             path: None,
+            serial: None,
             read_size: DEFAULT_READ_SIZE,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             count: None,
@@ -54,6 +60,7 @@ impl Default for Config {
             quiet: false,
             probe_all: false,
             list_only: false,
+            identity_json: false,
         }
     }
 }
@@ -114,6 +121,10 @@ fn run() -> Result<()> {
         return verify_capture_file(path, &config);
     }
 
+    if config.identity_json {
+        return print_identity_json(&config);
+    }
+
     println!("=== [Host PoC] Valve 하드웨어 Raw HID 캡처 시작 ===");
     let api = HidApi::new()?;
 
@@ -167,6 +178,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Config> {
             "--path" => {
                 config.path = Some(require_value(&arg, args.next())?);
             }
+            "--serial" => {
+                config.serial = Some(require_value(&arg, args.next())?);
+            }
+            "--identity-json" => config.identity_json = true,
             "--read-size" => {
                 let value = parse_usize_arg(&arg, args.next())?;
                 if value == 0 {
@@ -246,6 +261,8 @@ Options:
   --usage-page <hex|dec> HID usage page 필터
   --usage <hex|dec>      HID usage 필터
   --path <path>          특정 HID path 직접 지정
+  --serial <serial>      특정 Puck serial 필터
+  --identity-json        host가 관측한 Puck identity/collection snapshot을 JSON으로 출력
   --read-size <bytes>    Read buffer 크기 (기본값: 64)
   --timeout-ms <ms>      read_timeout 대기 시간 (기본값: 1000)
   --count <n>            n개 패킷 캡처 후 종료
@@ -263,11 +280,30 @@ Examples:
   cargo run -- --pid 0x1304 --interface 6 --duration-ms 3000
   cargo run -- --pid 0x1304 --usage-page 0xFF00 --duration-ms 3000
   cargo run -- --pid 0x1304 --probe-all --duration-ms 10000
+  cargo run -- --pid 0x1304 --identity-json
   cargo run -- --pid 0x1304 --duration-ms 5000 --output captures/manual.jsonl --quiet
   cargo run -- --verify captures/manual.jsonl --min-packets 20
   cargo run -- --interface 1 --timeout-ms 250
 "#
     );
+}
+
+fn print_identity_json(config: &Config) -> Result<()> {
+    let api = HidApi::new()?;
+    let filter = HidFilter {
+        vendor_id: Some(config.vendor_id),
+        product_id: config.product_id,
+        serial: config.serial.clone(),
+    };
+    let candidates = collect_core_candidates(&api, &filter);
+    let snapshot = build_puck_snapshot(&candidates)
+        .map_err(|error| CliError::Message(format!("identity snapshot 실패: {error}")))?;
+
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    serde_json::to_writer_pretty(&mut handle, &snapshot)?;
+    handle.write_all(b"\n")?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +338,12 @@ fn collect_candidates(api: &HidApi, config: &Config) -> Vec<DeviceCandidate> {
                 .is_none_or(|usage_page| device.usage_page() == usage_page)
         })
         .filter(|device| config.usage.is_none_or(|usage| device.usage() == usage))
+        .filter(|device| {
+            config
+                .serial
+                .as_ref()
+                .is_none_or(|serial| device.serial_number().is_some_and(|value| value == serial))
+        })
         .filter(|device| {
             config
                 .path

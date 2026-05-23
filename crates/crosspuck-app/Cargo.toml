@@ -1,0 +1,34 @@
+[package]
+name = "crosspuck-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "macOS menu bar shell for the CrossPuck host service"
+
+[[bin]]
+name = "CrossPuck"
+path = "src/main.rs"
+
+[dependencies]
+crosspuck-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = [
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { workspace = true, features = [
+    "NSAutoreleasePool",
+    "NSString",
+] }

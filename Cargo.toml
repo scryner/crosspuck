@@ -1,10 +1,21 @@
-[package]
-name = "crosspuck-host"
+[workspace]
+members = [
+    "crates/crosspuck-core",
+    "crates/crosspuck-cli",
+    "crates/crosspuck-app",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "Host-side macOS HID raw packet sniffer PoC for Steam Controller compatibility experiments"
 license = "MIT"
 
-[dependencies]
+[workspace.dependencies]
+crosspuck-core = { path = "crates/crosspuck-core" }
 hidapi = "2.6"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

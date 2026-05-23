@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--delay-ms" => delay_ms = value(&arg, args.next())?.parse()?,
             "-h" | "--help" => {
                 println!(
-                    "Usage: cargo run --example feature_probe -- --pid 0x1304 --interface 2 --send \"02 A3 00\" --get-report-id 0x02 --repeat 8"
+                    "Usage: cargo run -p crosspuck-cli --example feature_probe -- --pid 0x1304 --interface 2 --send \"02 A3 00\" --get-report-id 0x02 --repeat 8"
                 );
                 return Ok(());
             }

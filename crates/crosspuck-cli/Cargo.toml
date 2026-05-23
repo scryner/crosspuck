@@ -1,0 +1,15 @@
+[package]
+name = "crosspuck-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host-side macOS HID raw packet sniffer CLI for CrossPuck experiments"
+
+[[bin]]
+name = "crosspuck-host"
+path = "src/main.rs"
+
+[dependencies]
+crosspuck-core.workspace = true
+hidapi.workspace = true
+serde_json.workspace = true
