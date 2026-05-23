@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
+  <title>CrossPuck menu bar template icon</title>
+  <path d="M 11 8.5 H 33 Q 40.5 8.5 40.5 16 V 28 Q 40.5 35.5 33 35.5 H 11 Q 3.5 35.5 3.5 28 V 16 Q 3.5 8.5 11 8.5 Z"
+        fill="none" stroke="#000" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="12" y="12.6" width="20" height="9.4" rx="4.7"
+        fill="none" stroke="#000" stroke-width="2.8"/>
+  <g fill="#000">
+    <circle cx="17.2" cy="17.3" r="1.6"/>
+    <circle cx="22" cy="17.3" r="1.6"/>
+    <circle cx="26.8" cy="17.3" r="1.6"/>
+  </g>
+</svg>

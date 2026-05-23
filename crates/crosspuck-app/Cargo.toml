@@ -17,7 +17,9 @@ objc2.workspace = true
 objc2-app-kit = { workspace = true, features = [
     "NSApplication",
     "NSButton",
+    "NSCell",
     "NSControl",
+    "NSImage",
     "NSMenu",
     "NSMenuItem",
     "NSResponder",
@@ -29,6 +31,7 @@ objc2-app-kit = { workspace = true, features = [
     "objc2-core-foundation",
 ] }
 objc2-foundation = { workspace = true, features = [
+    "NSBundle",
     "NSAutoreleasePool",
     "NSString",
 ] }

@@ -15,16 +15,17 @@ fn main() -> ExitCode {
 mod macos {
     use crosspuck_core::state::{snapshot_host_state, ServiceState};
     use objc2::rc::Retained;
-    use objc2::{sel, MainThreadMarker};
+    use objc2::{sel, AnyThread, MainThreadMarker};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSSquareStatusItemLength,
-        NSStatusBar, NSStatusItem,
+        NSApplication, NSApplicationActivationPolicy, NSCellImagePosition, NSImage, NSImageScaling,
+        NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
     };
-    use objc2_foundation::{NSAutoreleasePool, NSString};
+    use objc2_foundation::{NSAutoreleasePool, NSBundle, NSString};
     use std::process::ExitCode;
 
     struct MenuBarObjects {
         _status_item: Retained<NSStatusItem>,
+        _icon: Option<Retained<NSImage>>,
         _menu: Retained<NSMenu>,
         _state_item: Retained<NSMenuItem>,
     }
@@ -49,9 +50,17 @@ mod macos {
     unsafe fn build_menu_bar(app: &NSApplication, mtm: MainThreadMarker) -> MenuBarObjects {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSSquareStatusItemLength);
+        let status_icon = load_status_icon();
 
         if let Some(button) = status_item.button(mtm) {
-            button.setTitle(&NSString::from_str("CP"));
+            if let Some(icon) = status_icon.as_ref() {
+                button.setTitle(&NSString::from_str(""));
+                button.setImage(Some(icon.as_ref()));
+                button.setImagePosition(NSCellImagePosition::ImageOnly);
+                button.setImageScaling(NSImageScaling::ScaleProportionallyDown);
+            } else {
+                button.setTitle(&NSString::from_str("CP"));
+            }
         }
 
         let menu = NSMenu::new(mtm);
@@ -79,8 +88,40 @@ mod macos {
 
         MenuBarObjects {
             _status_item: status_item,
+            _icon: status_icon,
             _menu: menu,
             _state_item: state_item,
         }
+    }
+
+    unsafe fn load_status_icon() -> Option<Retained<NSImage>> {
+        let name = NSString::from_str("CrossPuckStatusTemplate");
+        let pdf_ext = NSString::from_str("pdf");
+        let pdf_source_path = NSString::from_str(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/Resources/CrossPuckStatusTemplate.pdf"
+        ));
+        if let Some(image) = load_template_image(&name, &pdf_ext, &pdf_source_path) {
+            return Some(image);
+        }
+
+        let ext = NSString::from_str("png");
+        let source_path = NSString::from_str(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/Resources/CrossPuckStatusTemplate.png"
+        ));
+        load_template_image(&name, &ext, &source_path)
+    }
+
+    unsafe fn load_template_image(
+        name: &NSString,
+        ext: &NSString,
+        source_path: &NSString,
+    ) -> Option<Retained<NSImage>> {
+        let bundle_path = NSBundle::mainBundle().pathForResource_ofType(Some(name), Some(ext));
+        let path = bundle_path.as_deref().unwrap_or(source_path);
+        let image = NSImage::initWithContentsOfFile(NSImage::alloc(), path)?;
+        image.setTemplate(true);
+        Some(image)
     }
 }
