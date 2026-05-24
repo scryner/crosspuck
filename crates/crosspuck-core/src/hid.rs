@@ -214,7 +214,20 @@ pub fn target_score(device: &DeviceCandidate) -> u16 {
 }
 
 pub fn open_device(api: &HidApi, target: &DeviceCandidate) -> Result<HidDevice, HidSnapshotError> {
-    let path = CString::new(target.path.as_bytes()).map_err(|_| HidSnapshotError::InvalidPath)?;
+    open_path(api, &target.path)
+}
+
+pub fn open_path(api: &HidApi, path: &str) -> Result<HidDevice, HidSnapshotError> {
+    open_path_cstr(api, path)
+}
+
+pub fn open_path_with_new_api(path: &str) -> Result<HidDevice, HidSnapshotError> {
+    let api = HidApi::new()?;
+    open_path(&api, path)
+}
+
+fn open_path_cstr(api: &HidApi, path: &str) -> Result<HidDevice, HidSnapshotError> {
+    let path = CString::new(path.as_bytes()).map_err(|_| HidSnapshotError::InvalidPath)?;
     api.open_path(path.as_c_str()).map_err(Into::into)
 }
 

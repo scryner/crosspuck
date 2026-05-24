@@ -1,6 +1,11 @@
 use std::process::ExitCode;
 
 #[cfg(target_os = "macos")]
+mod hid_backend;
+#[cfg(target_os = "macos")]
+mod runtime;
+
+#[cfg(target_os = "macos")]
 fn main() -> ExitCode {
     macos::run()
 }
@@ -13,14 +18,17 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use crosspuck_core::state::{snapshot_host_state, ServiceState};
+    use crate::runtime::{start_host_service, AppState, HostServiceHandle};
     use objc2::rc::Retained;
-    use objc2::{sel, AnyThread, MainThreadMarker};
+    use objc2::runtime::ProtocolObject;
+    use objc2::{
+        define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
+    };
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSCellImagePosition, NSImage, NSImageScaling,
-        NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
+        NSMenu, NSMenuDelegate, NSMenuItem, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
     };
-    use objc2_foundation::{NSAutoreleasePool, NSBundle, NSString};
+    use objc2_foundation::{NSAutoreleasePool, NSBundle, NSObject, NSObjectProtocol, NSString};
     use std::process::ExitCode;
 
     struct MenuBarObjects {
@@ -28,6 +36,44 @@ mod macos {
         _icon: Option<Retained<NSImage>>,
         _menu: Retained<NSMenu>,
         _state_item: Retained<NSMenuItem>,
+        _menu_delegate: Retained<StateMenuDelegate>,
+        _service_handle: HostServiceHandle,
+    }
+
+    #[derive(Clone)]
+    struct StateMenuDelegateIvars {
+        app_state: AppState,
+        state_item: Retained<NSMenuItem>,
+    }
+
+    define_class!(
+        #[unsafe(super = NSObject)]
+        #[thread_kind = objc2::MainThreadOnly]
+        #[ivars = StateMenuDelegateIvars]
+        struct StateMenuDelegate;
+
+        unsafe impl NSObjectProtocol for StateMenuDelegate {}
+
+        unsafe impl NSMenuDelegate for StateMenuDelegate {
+            #[unsafe(method(menuWillOpen:))]
+            fn menu_will_open(&self, _menu: &NSMenu) {
+                refresh_state_item(&self.ivars().app_state, &self.ivars().state_item);
+            }
+        }
+    );
+
+    impl StateMenuDelegate {
+        fn new(
+            mtm: MainThreadMarker,
+            app_state: AppState,
+            state_item: Retained<NSMenuItem>,
+        ) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(StateMenuDelegateIvars {
+                app_state,
+                state_item,
+            });
+            unsafe { msg_send![super(this), init] }
+        }
     }
 
     pub fn run() -> ExitCode {
@@ -38,7 +84,9 @@ mod macos {
             let app = NSApplication::sharedApplication(mtm);
             app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-            let menu_objects = build_menu_bar(&app, mtm);
+            let app_state = AppState::new();
+            let service_handle = start_host_service(app_state.clone());
+            let menu_objects = build_menu_bar(&app, mtm, &app_state, service_handle);
             Box::leak(Box::new(menu_objects));
 
             app.run();
@@ -47,7 +95,12 @@ mod macos {
         ExitCode::SUCCESS
     }
 
-    unsafe fn build_menu_bar(app: &NSApplication, mtm: MainThreadMarker) -> MenuBarObjects {
+    unsafe fn build_menu_bar(
+        app: &NSApplication,
+        mtm: MainThreadMarker,
+        app_state: &AppState,
+        service_handle: HostServiceHandle,
+    ) -> MenuBarObjects {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSSquareStatusItemLength);
         let status_icon = load_status_icon();
@@ -66,11 +119,13 @@ mod macos {
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
 
-        let state = snapshot_host_state().unwrap_or(ServiceState::PuckDisconnected);
+        let state = app_state.snapshot();
         let state_title = NSString::from_str(&format!("상태: {}", state.menu_label()));
         let empty_key = NSString::from_str("");
         let state_item = menu.addItemWithTitle_action_keyEquivalent(&state_title, None, &empty_key);
         state_item.setEnabled(false);
+        let menu_delegate = StateMenuDelegate::new(mtm, app_state.clone(), state_item.clone());
+        menu.setDelegate(Some(ProtocolObject::from_ref(&*menu_delegate)));
 
         let separator = NSMenuItem::separatorItem(mtm);
         menu.addItem(&separator);
@@ -91,7 +146,15 @@ mod macos {
             _icon: status_icon,
             _menu: menu,
             _state_item: state_item,
+            _menu_delegate: menu_delegate,
+            _service_handle: service_handle,
         }
+    }
+
+    fn refresh_state_item(app_state: &AppState, state_item: &NSMenuItem) {
+        let state = app_state.snapshot();
+        let state_title = NSString::from_str(&format!("상태: {}", state.menu_label()));
+        state_item.setTitle(&state_title);
     }
 
     unsafe fn load_status_icon() -> Option<Retained<NSImage>> {

@@ -50,13 +50,20 @@ impl TransportListeners {
     }
 
     pub fn accept(&self) -> Result<TransportConnection, TransportError> {
-        let (control, _) = self.control.accept()?;
-        let (input, _) = self.input.accept()?;
+        let control = self.accept_control()?;
+        let input = self.accept_input()?;
 
-        Ok(TransportConnection {
-            control: ChannelStream::new(Channel::Control, control)?,
-            input: ChannelStream::new(Channel::Input, input)?,
-        })
+        Ok(TransportConnection { control, input })
+    }
+
+    pub fn accept_control(&self) -> Result<ChannelStream, TransportError> {
+        let (control, _) = self.control.accept()?;
+        ChannelStream::new(Channel::Control, control)
+    }
+
+    pub fn accept_input(&self) -> Result<ChannelStream, TransportError> {
+        let (input, _) = self.input.accept()?;
+        ChannelStream::new(Channel::Input, input)
     }
 }
 
@@ -105,6 +112,18 @@ impl ChannelStream {
     pub fn new(channel: Channel, stream: TcpStream) -> Result<Self, TransportError> {
         stream.set_nodelay(true)?;
         Ok(Self { channel, stream })
+    }
+
+    pub fn connect(channel: Channel, addr: SocketAddr) -> Result<Self, TransportError> {
+        Self::new(channel, TcpStream::connect(addr)?)
+    }
+
+    pub fn connect_timeout(
+        channel: Channel,
+        addr: SocketAddr,
+        timeout: Duration,
+    ) -> Result<Self, TransportError> {
+        Self::new(channel, TcpStream::connect_timeout(&addr, timeout)?)
     }
 
     pub fn channel(&self) -> Channel {

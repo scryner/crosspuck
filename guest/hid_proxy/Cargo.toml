@@ -5,11 +5,14 @@ edition = "2021"
 description = "CrossOver guest hid.dll proxy PoC that replays captured Steam Controller HID reports"
 license = "MIT"
 
+[workspace]
+
 [lib]
 name = "hid"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+crosspuck-core = { path = "../../crates/crosspuck-core", default-features = false }
 serde_json = "1.0"
 
 [target.'cfg(windows)'.dependencies]

@@ -33,5 +33,6 @@ objc2-app-kit = { workspace = true, features = [
 objc2-foundation = { workspace = true, features = [
     "NSBundle",
     "NSAutoreleasePool",
+    "NSObject",
     "NSString",
 ] }
