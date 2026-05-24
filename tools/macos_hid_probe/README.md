@@ -17,6 +17,30 @@ Run native Steam with the probe:
 tools/macos_hid_probe/launch_steam_with_probe.sh
 ```
 
+Run the feedback scenario capture for protocol design:
+
+```sh
+tools/macos_hid_probe/capture_feedback_scenarios.sh
+```
+
+This launches native Steam with the probe, writes JSONL markers for these
+manual windows, and runs the CLI analyzer at the end:
+
+- left touchpad haptic, 5 seconds
+- right touchpad haptic, 5 seconds
+- Steam controller test "Ping", 5 seconds
+
+Do not run `crosspuck-host`, `cargo run --bin crosspuck-host`, or any other
+standalone HID reader during this capture. Those tools open the puck directly
+and can prevent native Steam from recognizing it. The feedback capture must be
+probe-only: the dylib observes HID calls inside the Steam process and does not
+open the device on its own.
+
+The launch scripts abort if native Steam or `crosspuck-host` is already running.
+Quit Steam fully before starting a capture. If you intentionally need to attach
+to an already-running Steam process tree, set `CROSSPUCK_ALLOW_RUNNING_STEAM=1`,
+but that mode is not suitable for reference captures.
+
 Default log:
 
 ```text
@@ -39,8 +63,24 @@ CROSSPUCK_HOST_HID_VID=0x28DE
 CROSSPUCK_HOST_HID_PID=0x1304
 CROSSPUCK_HOST_HID_MAX_BYTES=256
 CROSSPUCK_HOST_HID_LOG_ALL=1
-STEAM_OSX=/Applications/Steam.app/Contents/MacOS/steam_osx
+CROSSPUCK_HOST_HID_JSONL=1
+CROSSPUCK_HOST_HID_LOG_LOAD=1
+CROSSPUCK_HOST_HID_LOG_INPUT=0
+CROSSPUCK_HOST_HID_LOG_GET=1
+CROSSPUCK_HOST_HID_LOG_VALUE=1
+STEAM_OSX="$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steam_osx"
 ```
+
+If `STEAM_OSX` is not set, the scripts prefer the installed
+`Steam.AppBundle` client binary under `~/Library/Application Support/Steam`
+and fall back to `/Applications/Steam.app/...`.
+
+The launchers run Steam with its current working directory set to the selected
+binary's `Contents/MacOS` directory. Probe load logging is disabled by default
+(`CROSSPUCK_HOST_HID_LOG_LOAD=0`) so the injected library does not do file I/O
+or symbol lookup until Steam actually calls one of the interposed HID APIs. Set
+`CROSSPUCK_HOST_HID_LOG_LOAD=1` only when checking whether the dylib is loaded
+into a process.
 
 The key sequence to compare against the CrossOver guest is usually:
 
@@ -50,6 +90,21 @@ GET request type=feature report_id=...
 GET result type=feature report_id=... bytes=...
 REGISTER input_report_callback ...
 INPUT callback type=input report_id=... bytes=...
+```
+
+For feedback analysis, focus on JSONL records with:
+
+```text
+type=hid_probe
+direction=host_to_device
+phase=request
+event=set_report | set_report_callback | set_value*
+```
+
+Analyze an existing JSONL capture:
+
+```sh
+cargo run -p crosspuck-cli -- --analyze-hid-probe captures/native_feedback_YYYYMMDD-HHMMSS.jsonl
 ```
 
 For the controller-recognition failure, capture from native Steam startup

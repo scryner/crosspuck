@@ -318,11 +318,49 @@ fn role_for_candidate(candidate: &DeviceCandidate) -> Option<HidCollectionRole> 
         candidate.usage_page,
         candidate.usage,
     ) {
-        (2, 0x0001, 0x0001) | (2, 0xFF00, 0x0001) => Some(HidCollectionRole::PuckMain),
+        (2, 0x0001, 0x0001) | (2, 0x0001, 0x0002) | (2, 0xFF00, 0x0001) => {
+            Some(HidCollectionRole::PuckMain)
+        }
         (3, 0x0001, 0x0001) | (3, 0xFF00, 0x0001) => Some(HidCollectionRole::PuckInterface3),
         (4, 0x0001, 0x0001) | (4, 0xFF00, 0x0001) => Some(HidCollectionRole::PuckInterface4),
         (5, 0x0001, 0x0001) | (5, 0xFF00, 0x0001) => Some(HidCollectionRole::PuckInterface5),
         (6, 0xFF00, 0x0002) => Some(HidCollectionRole::PuckVendorDongle),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(interface_number: i32, usage_page: u16, usage: u16) -> DeviceCandidate {
+        DeviceCandidate {
+            path: format!("test-interface-{interface_number}-{usage_page:04x}-{usage:04x}"),
+            vendor_id: VALVE_VENDOR_ID,
+            product_id: STEAM_CONTROLLER_PUCK_PRODUCT_ID,
+            version_number: 2,
+            interface_number,
+            usage_page,
+            usage,
+            manufacturer: Some("Valve Software".to_string()),
+            product: Some("Steam Controller Puck".to_string()),
+            serial: Some("FXB9961303C9C".to_string()),
+        }
+    }
+
+    #[test]
+    fn maps_interface_two_mouse_usage_to_puck_main() {
+        assert_eq!(
+            role_for_candidate(&candidate(2, 0x0001, 0x0002)),
+            Some(HidCollectionRole::PuckMain)
+        );
+    }
+
+    #[test]
+    fn maps_vendor_dongle_collection() {
+        assert_eq!(
+            role_for_candidate(&candidate(6, 0xFF00, 0x0002)),
+            Some(HidCollectionRole::PuckVendorDongle)
+        );
     }
 }

@@ -33,6 +33,8 @@ struct Config {
     duration_ms: Option<u64>,
     output_path: Option<String>,
     verify_path: Option<String>,
+    analyze_hid_probe_path: Option<String>,
+    analyze_max_events: usize,
     min_packets: u64,
     quiet: bool,
     probe_all: bool,
@@ -56,6 +58,8 @@ impl Default for Config {
             duration_ms: None,
             output_path: None,
             verify_path: None,
+            analyze_hid_probe_path: None,
+            analyze_max_events: 40,
             min_packets: 1,
             quiet: false,
             probe_all: false,
@@ -119,6 +123,10 @@ fn run() -> Result<()> {
 
     if let Some(path) = &config.verify_path {
         return verify_capture_file(path, &config);
+    }
+
+    if let Some(path) = &config.analyze_hid_probe_path {
+        return analyze_hid_probe_file(path, &config);
     }
 
     if config.identity_json {
@@ -215,6 +223,18 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Config> {
             "--verify" => {
                 config.verify_path = Some(require_value(&arg, args.next())?);
             }
+            "--analyze-hid-probe" => {
+                config.analyze_hid_probe_path = Some(require_value(&arg, args.next())?);
+            }
+            "--analyze-max-events" => {
+                let value = parse_usize_arg(&arg, args.next())?;
+                if value == 0 {
+                    return Err(CliError::Message(
+                        "--analyze-max-events must be greater than 0".into(),
+                    ));
+                }
+                config.analyze_max_events = value;
+            }
             "--min-packets" => {
                 let value = parse_u64_arg(&arg, args.next())?;
                 if value == 0 {
@@ -270,6 +290,10 @@ Options:
   --duration-ms <ms>     지정한 시간 동안만 실행 후 종료
   --output <file>        캡처 결과를 JSONL 파일로 저장
   --verify <file>        JSONL 캡처 파일을 검증하고 종료
+  --analyze-hid-probe <file>
+                         macOS native Steam HID probe JSONL을 분석하고 종료
+  --analyze-max-events <n>
+                         scenario별 출력할 host->device event 최대 개수 (기본값: 40)
   --min-packets <n>      verify 시 필요한 최소 packet 수 (기본값: 1)
   --quiet                캡처 중 packet별 콘솔 출력을 생략
   -h, --help             도움말 출력
@@ -283,6 +307,7 @@ Examples:
   cargo run -- --pid 0x1304 --identity-json
   cargo run -- --pid 0x1304 --duration-ms 5000 --output captures/manual.jsonl --quiet
   cargo run -- --verify captures/manual.jsonl --min-packets 20
+  cargo run -- --analyze-hid-probe captures/native_feedback_20260523-120000.jsonl
   cargo run -- --interface 1 --timeout-ms 250
 "#
     );
@@ -871,6 +896,339 @@ fn verify_capture_file(path: &str, config: &Config) -> Result<()> {
         "캡처 파일 검증 실패: {}개 문제",
         errors.len()
     )))
+}
+
+#[derive(Clone, Debug)]
+struct HidProbeMarker {
+    unix_ms: u64,
+    scenario: String,
+    phase: String,
+    description: String,
+}
+
+#[derive(Clone, Debug)]
+struct HidProbeFeedbackEvent {
+    unix_ms: u64,
+    event: String,
+    report_type: String,
+    report_id: Option<u64>,
+    len: Option<u64>,
+    hex: Option<String>,
+    result: Option<String>,
+    device: String,
+}
+
+#[derive(Clone, Debug)]
+struct ScenarioWindow {
+    scenario: String,
+    description: String,
+    start_ms: u64,
+    end_ms: u64,
+}
+
+fn analyze_hid_probe_file(path: &str, config: &Config) -> Result<()> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut markers = Vec::new();
+    let mut feedback_events = Vec::new();
+    let mut hid_probe_records = 0_u64;
+    let mut skipped_non_json = 0_u64;
+    let mut parse_errors = Vec::new();
+
+    for (line_index, line) in reader.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let value: Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(_) => {
+                skipped_non_json += 1;
+                continue;
+            }
+        };
+
+        match value.get("type").and_then(Value::as_str) {
+            Some("marker") => match parse_hid_probe_marker(&value) {
+                Some(marker) => markers.push(marker),
+                None => parse_errors.push(format!("line {line_number}: invalid marker record")),
+            },
+            Some("hid_probe") => {
+                hid_probe_records += 1;
+                if let Some(event) = parse_hid_probe_feedback_event(&value) {
+                    feedback_events.push(event);
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+
+    markers.sort_by_key(|marker| marker.unix_ms);
+    feedback_events.sort_by_key(|event| event.unix_ms);
+
+    let windows = scenario_windows(&markers, &feedback_events);
+
+    println!("HID probe 분석: {path}");
+    println!("  hid_probe records: {hid_probe_records}");
+    println!(
+        "  host->device feedback requests: {}",
+        feedback_events.len()
+    );
+    println!("  markers: {}", markers.len());
+    if skipped_non_json > 0 {
+        println!("  skipped non-JSON lines: {skipped_non_json}");
+    }
+    if !parse_errors.is_empty() {
+        println!("  parse warnings: {}", parse_errors.len());
+        for warning in parse_errors.iter().take(10) {
+            println!("    - {warning}");
+        }
+    }
+
+    if feedback_events.is_empty() {
+        println!("  host->device feedback request가 없습니다.");
+        println!(
+            "  DYLD interpose 적용 여부, Steam 재시작 여부, LOG_INPUT/LOG_GET 설정을 확인하십시오."
+        );
+        return Ok(());
+    }
+
+    for window in windows {
+        print_scenario_feedback_summary(&window, &feedback_events, config.analyze_max_events);
+    }
+
+    Ok(())
+}
+
+fn parse_hid_probe_marker(value: &Value) -> Option<HidProbeMarker> {
+    Some(HidProbeMarker {
+        unix_ms: value.get("unix_ms")?.as_u64()?,
+        scenario: value.get("scenario")?.as_str()?.to_string(),
+        phase: value.get("phase")?.as_str()?.to_string(),
+        description: value
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn parse_hid_probe_feedback_event(value: &Value) -> Option<HidProbeFeedbackEvent> {
+    if value.get("direction").and_then(Value::as_str) != Some("host_to_device") {
+        return None;
+    }
+    if value.get("phase").and_then(Value::as_str) != Some("request") {
+        return None;
+    }
+
+    let event = value.get("event")?.as_str()?;
+    if !event.starts_with("set_report") && !event.starts_with("set_value") {
+        return None;
+    }
+
+    let report_id = value.get("report_id").and_then(Value::as_u64).or_else(|| {
+        value
+            .get("element")
+            .and_then(|element| element.get("report_id"))
+            .and_then(Value::as_u64)
+    });
+    let len = value
+        .get("len")
+        .and_then(Value::as_u64)
+        .or_else(|| value.get("value_len").and_then(Value::as_u64));
+    let report_type = value
+        .get("report_type")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "value".to_string());
+
+    Some(HidProbeFeedbackEvent {
+        unix_ms: value.get("unix_ms")?.as_u64()?,
+        event: event.to_string(),
+        report_type,
+        report_id,
+        len,
+        hex: value
+            .get("hex")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        result: value
+            .get("result")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        device: device_summary(value.get("device")),
+    })
+}
+
+fn device_summary(device: Option<&Value>) -> String {
+    let Some(device) = device else {
+        return "-".to_string();
+    };
+
+    let vid = device
+        .get("vid_hex")
+        .and_then(Value::as_str)
+        .unwrap_or("VID?");
+    let pid = device
+        .get("pid_hex")
+        .and_then(Value::as_str)
+        .unwrap_or("PID?");
+    let usage_page = device
+        .get("usage_page_hex")
+        .and_then(Value::as_str)
+        .unwrap_or("UP?");
+    let usage = device
+        .get("usage_hex")
+        .and_then(Value::as_str)
+        .unwrap_or("U?");
+    let serial = device
+        .get("serial")
+        .and_then(Value::as_str)
+        .filter(|serial| !serial.is_empty())
+        .unwrap_or("-");
+
+    format!("{vid}/{pid} usage={usage_page}:{usage} serial={serial}")
+}
+
+fn scenario_windows(
+    markers: &[HidProbeMarker],
+    feedback_events: &[HidProbeFeedbackEvent],
+) -> Vec<ScenarioWindow> {
+    let mut windows = Vec::new();
+    let mut open = BTreeMap::<String, HidProbeMarker>::new();
+
+    for marker in markers {
+        match marker.phase.as_str() {
+            "start" if marker.scenario != "capture" => {
+                open.insert(marker.scenario.clone(), marker.clone());
+            }
+            "end" if marker.scenario != "capture" => {
+                if let Some(start) = open.remove(&marker.scenario) {
+                    windows.push(ScenarioWindow {
+                        scenario: marker.scenario.clone(),
+                        description: start.description,
+                        start_ms: start.unix_ms,
+                        end_ms: marker.unix_ms.max(start.unix_ms),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if windows.is_empty() {
+        let start_ms = feedback_events
+            .first()
+            .map(|event| event.unix_ms)
+            .unwrap_or(0);
+        let end_ms = feedback_events
+            .last()
+            .map(|event| event.unix_ms)
+            .unwrap_or(start_ms);
+        windows.push(ScenarioWindow {
+            scenario: "all".to_string(),
+            description: "no scenario markers".to_string(),
+            start_ms,
+            end_ms,
+        });
+    }
+
+    windows.sort_by_key(|window| window.start_ms);
+    windows
+}
+
+fn print_scenario_feedback_summary(
+    window: &ScenarioWindow,
+    events: &[HidProbeFeedbackEvent],
+    max_events: usize,
+) {
+    let scoped = events
+        .iter()
+        .filter(|event| event.unix_ms >= window.start_ms && event.unix_ms <= window.end_ms)
+        .collect::<Vec<_>>();
+    let duration_ms = window.end_ms.saturating_sub(window.start_ms);
+
+    println!();
+    println!(
+        "Scenario: {} ({}ms) - {}",
+        window.scenario, duration_ms, window.description
+    );
+    println!("  host->device requests: {}", scoped.len());
+
+    if scoped.is_empty() {
+        println!("  이 window 안에는 feedback request가 없습니다.");
+        return;
+    }
+
+    let mut by_signature = BTreeMap::<String, u64>::new();
+    let mut unique_payloads = BTreeSet::<String>::new();
+    for event in &scoped {
+        *by_signature.entry(event_signature(event)).or_default() += 1;
+        if let Some(hex) = &event.hex {
+            unique_payloads.insert(hex.clone());
+        }
+    }
+
+    println!("  unique payloads: {}", unique_payloads.len());
+    println!("  request groups:");
+    for (signature, count) in by_signature {
+        println!("    {:>4}  {signature}", count);
+    }
+
+    println!("  ordered events:");
+    for event in scoped.iter().take(max_events) {
+        let rel_ms = event.unix_ms.saturating_sub(window.start_ms);
+        println!(
+            "    +{:>6}ms {:<32} type={:<7} id={} len={} result={} {} hex={}",
+            rel_ms,
+            event.event,
+            event.report_type,
+            event
+                .report_id
+                .map(|id| format!("0x{id:02X}"))
+                .unwrap_or_else(|| "-".to_string()),
+            event
+                .len
+                .map(|len| len.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            event.result.as_deref().unwrap_or("-"),
+            event.device,
+            event
+                .hex
+                .as_deref()
+                .map(|hex| shorten(hex, 160))
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+    if scoped.len() > max_events {
+        println!("    ... {} more events", scoped.len() - max_events);
+    }
+}
+
+fn event_signature(event: &HidProbeFeedbackEvent) -> String {
+    format!(
+        "{} type={} id={} len={}",
+        event.event,
+        event.report_type,
+        event
+            .report_id
+            .map(|id| format!("0x{id:02X}"))
+            .unwrap_or_else(|| "-".to_string()),
+        event
+            .len
+            .map(|len| len.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    )
+}
+
+fn shorten(value: &str, max_chars: usize) -> String {
+    if value.len() <= max_chars {
+        return value.to_string();
+    }
+    format!("{} ...", &value[..max_chars])
 }
 
 fn create_parent_dir(path: &str) -> Result<()> {
