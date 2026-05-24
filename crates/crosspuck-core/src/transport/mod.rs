@@ -49,6 +49,12 @@ impl TransportListeners {
         })
     }
 
+    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), TransportError> {
+        self.control.set_nonblocking(nonblocking)?;
+        self.input.set_nonblocking(nonblocking)?;
+        Ok(())
+    }
+
     pub fn accept(&self) -> Result<TransportConnection, TransportError> {
         let control = self.accept_control()?;
         let input = self.accept_input()?;
@@ -110,6 +116,7 @@ pub struct ChannelStream {
 
 impl ChannelStream {
     pub fn new(channel: Channel, stream: TcpStream) -> Result<Self, TransportError> {
+        stream.set_nonblocking(false)?;
         stream.set_nodelay(true)?;
         Ok(Self { channel, stream })
     }

@@ -1,4 +1,5 @@
-use hidapi::{DeviceInfo, HidApi, HidDevice};
+pub use hidapi::HidDevice;
+use hidapi::{DeviceInfo, HidApi};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::CString;

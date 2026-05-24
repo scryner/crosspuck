@@ -1,11 +1,14 @@
-use crate::hid_backend::{HostHidBackend, HostHidError};
-use crosspuck_core::hid::{open_path_with_new_api, snapshot_for_filter, HidFilter};
+use crate::hid_backend::{HostBackend, HostHidError, RealHostBackend};
+use crosspuck_core::hid::{snapshot_for_filter, HidFilter};
 use crosspuck_core::protocol::{
-    Frame, GetFeature, Hello, HelloOk, IdentityPayload, InputAttach, InputAttachOk, InputReport,
-    MessageType, ProtocolError, SetFeature, SetOutput, StatusCode, WireDecode, WirePayload,
-    WriteReport, CONTROL_PAYLOAD_LIMIT, INPUT_PAYLOAD_LIMIT, PROTOCOL_VERSION,
+    Frame, FrameIoError, GetFeature, Hello, HelloOk, IdentityPayload, InputAttach, InputAttachOk,
+    InputReport, MessageType, ProtocolError, SetFeature, SetOutput, StatusCode, WireDecode,
+    WirePayload, WriteReport, CONTROL_PAYLOAD_LIMIT, INPUT_PAYLOAD_LIMIT, PROTOCOL_VERSION,
 };
-use crosspuck_core::transport::{ChannelStream, TransportError, TransportListeners};
+use crosspuck_core::transport::{
+    ChannelStream, TransportAddrs, TransportError, TransportListeners,
+};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -14,24 +17,73 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HostRuntimeState {
     Starting,
-    Listening,
+    Listening {
+        control_addr: SocketAddr,
+        input_addr: SocketAddr,
+    },
     PuckDisconnected,
-    PuckConnected { serial: String },
-    GuestConnected { session_id: u32, serial: String },
-    Degraded { reason: String },
+    PuckConnected {
+        serial: String,
+    },
+    GuestConnected {
+        session_id: u32,
+        serial: String,
+        guest_pid: u32,
+    },
+    Degraded {
+        reason: String,
+    },
+    Stopping,
 }
 
 impl HostRuntimeState {
-    pub fn menu_label(&self) -> String {
+    pub fn menu_view(&self) -> MenuView {
         match self {
-            Self::Starting => "시작 중".to_string(),
-            Self::Listening => "Guest 대기 중".to_string(),
-            Self::PuckDisconnected => "Puck 연결 안됨".to_string(),
-            Self::PuckConnected { serial } => format!("Puck 연결됨 ({serial})"),
-            Self::GuestConnected { session_id, serial } => {
-                format!("Guest proxy 연결됨 ({serial}, session={session_id})")
+            Self::Starting => MenuView::new("시작 중", "-", "-", "-"),
+            Self::Listening {
+                control_addr,
+                input_addr,
+            } => MenuView::new(
+                "Guest 대기 중",
+                "-",
+                &format!("{control_addr}, {input_addr}"),
+                "-",
+            ),
+            Self::PuckDisconnected => MenuView::new("Puck 연결 안됨", "-", "-", "-"),
+            Self::PuckConnected { serial } => {
+                MenuView::new("Puck 연결됨", serial.as_str(), "-", "-")
             }
-            Self::Degraded { reason } => format!("오류 ({reason})"),
+            Self::GuestConnected {
+                session_id,
+                serial,
+                guest_pid,
+            } => MenuView::new(
+                "Guest proxy 연결됨",
+                serial.as_str(),
+                &format!("pid={guest_pid}, session={session_id}"),
+                "-",
+            ),
+            Self::Degraded { reason } => MenuView::new("오류", "-", "-", reason.as_str()),
+            Self::Stopping => MenuView::new("종료 중", "-", "-", "-"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MenuView {
+    pub status: String,
+    pub puck: String,
+    pub guest: String,
+    pub error: String,
+}
+
+impl MenuView {
+    fn new(status: &str, puck: &str, guest: &str, error: &str) -> Self {
+        Self {
+            status: status.to_string(),
+            puck: puck.to_string(),
+            guest: guest.to_string(),
+            error: error.to_string(),
         }
     }
 }
@@ -65,47 +117,126 @@ impl AppState {
 }
 
 pub struct HostServiceHandle {
-    _thread: JoinHandle<()>,
+    stop: Arc<AtomicBool>,
+    thread: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+impl HostServiceHandle {
+    pub fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut thread) = self.thread.lock() {
+            if let Some(thread) = thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+impl Clone for HostServiceHandle {
+    fn clone(&self) -> Self {
+        Self {
+            stop: Arc::clone(&self.stop),
+            thread: Arc::clone(&self.thread),
+        }
+    }
 }
 
 pub fn start_host_service(app_state: AppState) -> HostServiceHandle {
-    let thread = thread::spawn(move || run_supervisor(app_state));
-    HostServiceHandle { _thread: thread }
+    start_host_service_on(app_state, TransportAddrs::default())
 }
 
-fn run_supervisor(app_state: AppState) {
+fn start_host_service_on(app_state: AppState, addrs: TransportAddrs) -> HostServiceHandle {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let thread = thread::spawn(move || run_supervisor(app_state, thread_stop, addrs));
+    HostServiceHandle {
+        stop,
+        thread: Arc::new(Mutex::new(Some(thread))),
+    }
+}
+
+fn run_supervisor(app_state: AppState, stop: Arc<AtomicBool>, addrs: TransportAddrs) {
     app_state.set(HostRuntimeState::Starting);
 
-    let listeners = match TransportListeners::bind_default() {
-        Ok(listeners) => listeners,
-        Err(error) => {
-            app_state.set(HostRuntimeState::Degraded {
-                reason: format!("listen failed: {error}"),
-            });
-            return;
-        }
-    };
-    app_state.set(HostRuntimeState::Listening);
-
-    let mut next_session_id = 1_u32;
-    loop {
-        let mut control = match listeners.accept_control() {
-            Ok(control) => control,
+    while !stop.load(Ordering::Relaxed) {
+        let listeners = match TransportListeners::bind(addrs) {
+            Ok(listeners) => listeners,
             Err(error) => {
                 app_state.set(HostRuntimeState::Degraded {
-                    reason: format!("control accept failed: {error}"),
+                    reason: format!("listen failed: {error}"),
                 });
+                sleep_until_stop(&stop, Duration::from_secs(1));
                 continue;
             }
         };
 
+        if let Err(error) = listeners.set_nonblocking(true) {
+            app_state.set(HostRuntimeState::Degraded {
+                reason: format!("listen setup failed: {error}"),
+            });
+            sleep_until_stop(&stop, Duration::from_secs(1));
+            continue;
+        }
+
+        let addrs = match listeners.local_addrs() {
+            Ok(addrs) => addrs,
+            Err(error) => {
+                app_state.set(HostRuntimeState::Degraded {
+                    reason: format!("listen address failed: {error}"),
+                });
+                sleep_until_stop(&stop, Duration::from_secs(1));
+                continue;
+            }
+        };
+        app_state.set(HostRuntimeState::Listening {
+            control_addr: addrs.control,
+            input_addr: addrs.input,
+        });
+
+        run_accept_loop(&listeners, &app_state, &stop);
+    }
+
+    app_state.set(HostRuntimeState::Stopping);
+}
+
+fn run_accept_loop(listeners: &TransportListeners, app_state: &AppState, stop: &Arc<AtomicBool>) {
+    let mut next_session_id = 1_u32;
+    let mut next_puck_probe = Instant::now();
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+
+        if Instant::now() >= next_puck_probe {
+            refresh_idle_puck_state(listeners, app_state);
+            next_puck_probe = Instant::now() + Duration::from_secs(1);
+        }
+
+        let mut control = match listeners.accept_control() {
+            Ok(control) => control,
+            Err(error) if is_would_block(&error) => {
+                sleep_until_stop(stop, Duration::from_millis(50));
+                continue;
+            }
+            Err(error) => {
+                app_state.set(HostRuntimeState::Degraded {
+                    reason: format!("control accept failed: {error}"),
+                });
+                sleep_until_stop(stop, Duration::from_millis(250));
+                continue;
+            }
+        };
+        let _ = control.set_read_timeout(Some(Duration::from_millis(250)));
+        let _ = control.set_write_timeout(Some(Duration::from_millis(250)));
+
         let session_id = next_session_id;
         next_session_id = next_session_id.wrapping_add(1).max(1);
-        match handle_session(&listeners, &mut control, session_id, &app_state) {
+        match handle_session(listeners, &mut control, session_id, app_state, stop) {
             Ok(()) => {}
             Err(RuntimeError::DeviceUnavailable(_)) => {
                 app_state.set(HostRuntimeState::PuckDisconnected);
             }
+            Err(error) if stop.load(Ordering::Relaxed) && error.is_timeout() => {}
             Err(error) => {
                 app_state.set(HostRuntimeState::Degraded {
                     reason: format!("session failed: {error}"),
@@ -115,11 +246,24 @@ fn run_supervisor(app_state: AppState) {
     }
 }
 
+fn refresh_idle_puck_state(listeners: &TransportListeners, app_state: &AppState) {
+    if listeners.local_addrs().is_err() {
+        return;
+    }
+    match snapshot_for_filter(&HidFilter::steam_puck()) {
+        Ok(snapshot) => app_state.set(HostRuntimeState::PuckConnected {
+            serial: snapshot.identity.serial,
+        }),
+        Err(_) => app_state.set(HostRuntimeState::PuckDisconnected),
+    }
+}
+
 fn handle_session(
     listeners: &TransportListeners,
     control: &mut ChannelStream,
     session_id: u32,
     app_state: &AppState,
+    stop: &Arc<AtomicBool>,
 ) -> Result<(), RuntimeError> {
     let hello_frame = control.read_frame()?;
     if hello_frame.header.message_type != MessageType::Hello {
@@ -147,20 +291,51 @@ fn handle_session(
         }
     };
     let identity = IdentityPayload::try_from(&snapshot)?;
-    let backend = HostHidBackend::new(snapshot);
+    let backend = Arc::new(RealHostBackend::new(snapshot, identity));
+    handle_session_with_backend(
+        listeners,
+        control,
+        SessionStart {
+            session_id,
+            hello_request_id: hello_frame.header.id,
+            guest_pid: hello.guest_pid,
+        },
+        app_state,
+        backend,
+        stop,
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SessionStart {
+    session_id: u32,
+    hello_request_id: u32,
+    guest_pid: u32,
+}
+
+fn handle_session_with_backend(
+    listeners: &TransportListeners,
+    control: &mut ChannelStream,
+    session: SessionStart,
+    app_state: &AppState,
+    backend: Arc<dyn HostBackend>,
+    stop: &Arc<AtomicBool>,
+) -> Result<(), RuntimeError> {
+    let identity = backend.identity().clone();
     app_state.set(HostRuntimeState::PuckConnected {
         serial: identity.serial.clone(),
     });
 
     write_payload(
         control,
-        hello_frame.header.id,
-        &HelloOk::success(session_id, identity.default_input_report_len()),
+        session.hello_request_id,
+        &HelloOk::success(session.session_id, identity.default_input_report_len()),
     )?;
     write_payload(control, 0, &identity)?;
 
-    let mut input = listeners.accept_input()?;
+    let mut input = accept_input_for_session(listeners, stop)?;
     input.set_write_timeout(Some(Duration::from_millis(250)))?;
+    input.set_read_timeout(Some(Duration::from_millis(250)))?;
     let attach_frame = input.read_frame()?;
     if attach_frame.header.message_type != MessageType::InputAttach {
         return Err(RuntimeError::UnexpectedMessage {
@@ -169,7 +344,7 @@ fn handle_session(
         });
     }
     let attach = InputAttach::decode(&attach_frame.payload)?;
-    let attach_status = if attach.session_id == session_id {
+    let attach_status = if attach.session_id == session.session_id {
         StatusCode::Ok
     } else {
         StatusCode::BadRequest
@@ -185,19 +360,20 @@ fn handle_session(
     )?;
     if !attach_status.is_ok() {
         return Err(RuntimeError::SessionMismatch {
-            expected: session_id,
+            expected: session.session_id,
             actual: attach.session_id,
         });
     }
 
     app_state.set(HostRuntimeState::GuestConnected {
-        session_id,
+        session_id: session.session_id,
         serial: identity.serial.clone(),
+        guest_pid: session.guest_pid,
     });
 
     let input_running = Arc::new(AtomicBool::new(true));
-    let input_thread = spawn_input_stream(input, backend.clone(), Arc::clone(&input_running))?;
-    let control_result = run_control_loop(control, &backend);
+    let input_thread = spawn_input_stream(input, Arc::clone(&backend), Arc::clone(&input_running))?;
+    let control_result = run_control_loop(control, backend.as_ref(), stop);
     input_running.store(false, Ordering::Relaxed);
     let _ = input_thread.join();
     backend.cleanup_feedback();
@@ -209,17 +385,17 @@ fn handle_session(
 
 fn run_control_loop(
     control: &mut ChannelStream,
-    backend: &HostHidBackend,
+    backend: &dyn HostBackend,
+    stop: &Arc<AtomicBool>,
 ) -> Result<(), RuntimeError> {
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let frame = match control.read_frame() {
             Ok(frame) => frame,
-            Err(TransportError::Io(error))
-                if error.kind() == std::io::ErrorKind::UnexpectedEof
-                    || error.kind() == std::io::ErrorKind::ConnectionReset =>
-            {
-                return Ok(());
-            }
+            Err(error) if is_disconnect(&error) => return Ok(()),
+            Err(error) if is_timeout_or_would_block(&error) => continue,
             Err(error) => return Err(error.into()),
         };
 
@@ -247,35 +423,90 @@ fn run_control_loop(
     }
 }
 
+fn accept_input_for_session(
+    listeners: &TransportListeners,
+    stop: &Arc<AtomicBool>,
+) -> Result<ChannelStream, RuntimeError> {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(RuntimeError::Stopping);
+        }
+        match listeners.accept_input() {
+            Ok(input) => return Ok(input),
+            Err(error) if is_would_block(&error) => {
+                sleep_until_stop(stop, Duration::from_millis(50));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn is_disconnect(error: &TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::Io(io_error)
+            if io_error.kind() == std::io::ErrorKind::UnexpectedEof
+                || io_error.kind() == std::io::ErrorKind::ConnectionReset
+    ) || matches!(
+        error,
+        TransportError::Frame(FrameIoError::Io(io_error))
+            if io_error.kind() == std::io::ErrorKind::UnexpectedEof
+                || io_error.kind() == std::io::ErrorKind::ConnectionReset
+    )
+}
+
+fn is_would_block(error: &TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::Io(io_error) if io_error.kind() == std::io::ErrorKind::WouldBlock
+    )
+}
+
+fn is_timeout_or_would_block(error: &TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::Io(io_error)
+            if io_error.kind() == std::io::ErrorKind::WouldBlock
+                || io_error.kind() == std::io::ErrorKind::TimedOut
+    ) || matches!(
+        error,
+        TransportError::Frame(FrameIoError::Io(io_error))
+            if io_error.kind() == std::io::ErrorKind::WouldBlock
+                || io_error.kind() == std::io::ErrorKind::TimedOut
+    )
+}
+
+fn sleep_until_stop(stop: &Arc<AtomicBool>, duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn spawn_input_stream(
     mut input: ChannelStream,
-    backend: HostHidBackend,
+    backend: Arc<dyn HostBackend>,
     running: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, RuntimeError> {
-    let collection = backend.input_collection()?;
-    let interface_number = u8::try_from(collection.interface_number)
-        .map_err(|_| RuntimeError::InvalidInterfaceNumber(collection.interface_number))?;
-    let role = collection.role.into();
+    let descriptor = backend.input_descriptor()?;
 
     Ok(thread::spawn(move || {
-        let Ok(device) = open_path_with_new_api(&collection.path) else {
+        let Ok(mut reader) = backend.open_input_reader() else {
             return;
         };
-        let read_len = usize::from(collection.input_report_len).max(64);
-        let mut buffer = vec![0_u8; read_len];
         let start = Instant::now();
         let mut sequence = 1_u32;
 
         while running.load(Ordering::Relaxed) {
-            match device.read_timeout(&mut buffer, 10) {
-                Ok(0) => {}
-                Ok(read) => {
+            match reader.read_report(Duration::from_millis(10)) {
+                Ok(None) => {}
+                Ok(Some(data)) => {
                     let report = InputReport {
-                        interface_number,
-                        role,
+                        interface_number: descriptor.interface_number,
+                        role: descriptor.role,
                         host_monotonic_us: start.elapsed().as_micros().min(u128::from(u64::MAX))
                             as u64,
-                        data: buffer[..read].to_vec(),
+                        data,
                     };
                     if write_payload(&mut input, sequence, &report).is_err() {
                         break;
@@ -324,11 +555,11 @@ enum RuntimeError {
     UnexpectedControlMessage(MessageType),
     ProtocolVersionMismatch(u16),
     DeviceUnavailable(String),
+    Stopping,
     SessionMismatch {
         expected: u32,
         actual: u32,
     },
-    InvalidInterfaceNumber(i32),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -350,16 +581,20 @@ impl std::fmt::Display for RuntimeError {
                 write!(f, "unsupported guest protocol version: {version}")
             }
             Self::DeviceUnavailable(error) => write!(f, "device unavailable: {error}"),
+            Self::Stopping => write!(f, "stopping"),
             Self::SessionMismatch { expected, actual } => {
                 write!(
                     f,
                     "input session mismatch: expected {expected}, got {actual}"
                 )
             }
-            Self::InvalidInterfaceNumber(interface_number) => {
-                write!(f, "invalid HID interface number: {interface_number}")
-            }
         }
+    }
+}
+
+impl RuntimeError {
+    fn is_timeout(&self) -> bool {
+        matches!(self, Self::Transport(error) if is_timeout_or_would_block(error))
     }
 }
 
@@ -380,5 +615,420 @@ impl From<ProtocolError> for RuntimeError {
 impl From<HostHidError> for RuntimeError {
     fn from(value: HostHidError) -> Self {
         Self::HostHid(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hid_backend::{HostBackend, InputDescriptor, InputReportReader};
+    use crosspuck_core::guest::{GuestTransportClient, GuestTransportConfig};
+    use crosspuck_core::protocol::{
+        Channel, CollectionDescriptor, CollectionRole, FeatureResult, IdentityPayload,
+        SetFeatureResult, SetOutputResult, StatusCode, WriteResult,
+    };
+    use crosspuck_core::transport::{ChannelStream, TransportAddrs, TransportListeners};
+    use std::collections::VecDeque;
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+
+    #[derive(Clone)]
+    struct FakeBackend {
+        identity: IdentityPayload,
+        reports: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        operations: Arc<Mutex<Vec<String>>>,
+        cleanup_called: Arc<AtomicBool>,
+    }
+
+    impl FakeBackend {
+        fn new(reports: Vec<Vec<u8>>) -> Self {
+            Self {
+                identity: test_identity(),
+                reports: Arc::new(Mutex::new(reports.into())),
+                operations: Arc::new(Mutex::new(Vec::new())),
+                cleanup_called: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn operations(&self) -> Vec<String> {
+            self.operations.lock().unwrap().clone()
+        }
+
+        fn cleanup_called(&self) -> bool {
+            self.cleanup_called.load(Ordering::Relaxed)
+        }
+
+        fn push_operation(&self, operation: impl Into<String>) {
+            self.operations.lock().unwrap().push(operation.into());
+        }
+    }
+
+    impl HostBackend for FakeBackend {
+        fn identity(&self) -> &IdentityPayload {
+            &self.identity
+        }
+
+        fn input_descriptor(&self) -> Result<InputDescriptor, HostHidError> {
+            Ok(InputDescriptor {
+                interface_number: 2,
+                role: CollectionRole::PuckMain,
+            })
+        }
+
+        fn open_input_reader(&self) -> Result<Box<dyn InputReportReader>, HostHidError> {
+            Ok(Box::new(FakeInputReader {
+                reports: Arc::clone(&self.reports),
+            }))
+        }
+
+        fn get_feature(&self, request: &GetFeature) -> FeatureResult {
+            self.push_operation(format!(
+                "get_feature:{}:{:02X}:{}",
+                request.interface_number, request.report_id, request.requested_len
+            ));
+            FeatureResult {
+                status: StatusCode::Ok,
+                os_error: 0,
+                data: vec![request.report_id, 0xB4],
+            }
+        }
+
+        fn set_feature(&self, request: &SetFeature) -> SetFeatureResult {
+            self.push_operation(format!("set_feature:{:02X?}", request.data));
+            SetFeatureResult {
+                status: StatusCode::Ok,
+                bytes_accepted: request.data.len() as u16,
+                os_error: 0,
+            }
+        }
+
+        fn set_output(&self, request: &SetOutput) -> SetOutputResult {
+            self.push_operation(format!("set_output:{:02X?}", request.data));
+            SetOutputResult {
+                status: StatusCode::Ok,
+                bytes_accepted: request.data.len() as u16,
+                os_error: 0,
+            }
+        }
+
+        fn write_report(&self, request: &WriteReport) -> WriteResult {
+            self.push_operation(format!("write:{:02X?}", request.data));
+            WriteResult {
+                status: StatusCode::Ok,
+                bytes_written: request.data.len() as u16,
+                os_error: 0,
+            }
+        }
+
+        fn cleanup_feedback(&self) {
+            self.cleanup_called.store(true, Ordering::Relaxed);
+        }
+    }
+
+    struct FakeInputReader {
+        reports: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    }
+
+    impl InputReportReader for FakeInputReader {
+        fn read_report(&mut self, _timeout: Duration) -> Result<Option<Vec<u8>>, HostHidError> {
+            Ok(self.reports.lock().unwrap().pop_front())
+        }
+    }
+
+    #[test]
+    fn host_session_serves_shared_mock_guest_input_and_commands() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = listeners.local_addrs().unwrap();
+        let backend = FakeBackend::new(vec![vec![0x79, 0x02]]);
+        let backend_for_server = backend.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut control = listeners.accept_control().unwrap();
+            let hello = control.read_frame().unwrap();
+            handle_session_with_backend(
+                &listeners,
+                &mut control,
+                SessionStart {
+                    session_id: 1,
+                    hello_request_id: hello.header.id,
+                    guest_pid: 1234,
+                },
+                &AppState::new(),
+                Arc::new(backend_for_server),
+                &server_stop,
+            )
+            .unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        let mut guest = GuestTransportClient::connect(GuestTransportConfig {
+            addrs,
+            guest_label: "host-runtime-test".to_string(),
+            ..GuestTransportConfig::default()
+        })
+        .unwrap();
+
+        assert_eq!(guest.identity().serial, "FXB9961303C9C");
+        assert_eq!(guest.read_input_report().unwrap().data, vec![0x79, 0x02]);
+        assert_eq!(
+            guest.get_feature(2, 0x02, 64, 100).unwrap().data,
+            vec![0x02, 0xB4]
+        );
+        assert_eq!(
+            guest
+                .write_report(2, 100, &[0x00, 0x80, 0xAA, 0xBB])
+                .unwrap()
+                .bytes_written,
+            4
+        );
+        assert_eq!(
+            guest
+                .set_feature(2, 100, &[0x01, 0x83, 0x01, 0x00])
+                .unwrap()
+                .bytes_accepted,
+            4
+        );
+        assert_eq!(
+            guest
+                .set_output(2, 100, &[0x80, 0x00, 0x00, 0x00])
+                .unwrap()
+                .bytes_accepted,
+            4
+        );
+
+        drop(guest);
+        server.join().unwrap();
+
+        assert_eq!(
+            backend.operations(),
+            vec![
+                "get_feature:2:02:64",
+                "write:[00, 80, AA, BB]",
+                "set_feature:[01, 83, 01, 00]",
+                "set_output:[80, 00, 00, 00]",
+            ]
+        );
+        assert!(backend.cleanup_called());
+    }
+
+    #[test]
+    fn host_runtime_accepts_reconnect_with_shared_guest_runtime() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = listeners.local_addrs().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            for session_id in 1..=2 {
+                let backend = FakeBackend::new(Vec::new());
+                let mut control = listeners.accept_control().unwrap();
+                let hello = control.read_frame().unwrap();
+                handle_session_with_backend(
+                    &listeners,
+                    &mut control,
+                    SessionStart {
+                        session_id,
+                        hello_request_id: hello.header.id,
+                        guest_pid: 1234,
+                    },
+                    &AppState::new(),
+                    Arc::new(backend),
+                    &server_stop,
+                )
+                .unwrap();
+            }
+        });
+
+        ready_rx.recv().unwrap();
+        for _ in 0..2 {
+            let guest = GuestTransportClient::connect(GuestTransportConfig {
+                addrs,
+                guest_label: "host-reconnect-test".to_string(),
+                ..GuestTransportConfig::default()
+            })
+            .unwrap();
+            assert_eq!(guest.identity().serial, "FXB9961303C9C");
+            drop(guest);
+        }
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn host_session_rejects_control_message_on_input_channel() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = listeners.local_addrs().unwrap();
+        let backend = FakeBackend::new(Vec::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut control = listeners.accept_control().unwrap();
+            let hello = control.read_frame().unwrap();
+            let result = handle_session_with_backend(
+                &listeners,
+                &mut control,
+                SessionStart {
+                    session_id: 1,
+                    hello_request_id: hello.header.id,
+                    guest_pid: 1234,
+                },
+                &AppState::new(),
+                Arc::new(backend),
+                &server_stop,
+            );
+            result_tx
+                .send(matches!(
+                    result,
+                    Err(RuntimeError::UnexpectedMessage {
+                        expected: MessageType::InputAttach,
+                        actual: MessageType::Hello,
+                    })
+                ))
+                .unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        let mut control = ChannelStream::connect(Channel::Control, addrs.control).unwrap();
+        write_payload(&mut control, 1, &Hello::new(1234)).unwrap();
+        assert_eq!(
+            control.read_frame().unwrap().header.message_type,
+            MessageType::HelloOk
+        );
+        assert_eq!(
+            control.read_frame().unwrap().header.message_type,
+            MessageType::Identity
+        );
+
+        let mut input = ChannelStream::connect(Channel::Input, addrs.input).unwrap();
+        write_payload(&mut input, 2, &Hello::new(1234)).unwrap();
+        drop(input);
+        drop(control);
+
+        assert!(result_rx.recv().unwrap());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn host_session_rejects_bad_protocol_version_before_hid_probe() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = listeners.local_addrs().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut control = listeners.accept_control().unwrap();
+            let result =
+                handle_session(&listeners, &mut control, 1, &AppState::new(), &server_stop);
+            result_tx
+                .send(matches!(
+                    result,
+                    Err(RuntimeError::ProtocolVersionMismatch(999))
+                ))
+                .unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        let mut control = ChannelStream::connect(Channel::Control, addrs.control).unwrap();
+        write_payload(
+            &mut control,
+            1,
+            &Hello {
+                guest_pid: 1234,
+                guest_protocol_version: 999,
+                guest_capabilities: 0,
+            },
+        )
+        .unwrap();
+
+        let response = control.read_frame().unwrap();
+        assert_eq!(response.header.message_type, MessageType::HelloOk);
+        assert_eq!(response.header.id, 1);
+        let hello_ok = HelloOk::decode(&response.payload).unwrap();
+        assert_eq!(hello_ok.status, StatusCode::ProtocolError);
+
+        assert!(result_rx.recv().unwrap());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn host_service_shutdown_stops_idle_listener() {
+        let app_state = AppState::new();
+        let service = start_host_service_on(app_state.clone(), TransportAddrs::loopback(0, 0));
+
+        let state = wait_for_state(&app_state, |state| {
+            !matches!(state, HostRuntimeState::Starting)
+        });
+        assert!(!matches!(state, HostRuntimeState::Starting));
+
+        service.shutdown();
+        assert_eq!(app_state.snapshot(), HostRuntimeState::Stopping);
+    }
+
+    #[test]
+    fn host_service_reports_degraded_on_port_conflict() {
+        let guard = TcpListener::bind("127.0.0.1:0").unwrap();
+        let app_state = AppState::new();
+        let service = start_host_service_on(
+            app_state.clone(),
+            TransportAddrs::loopback(guard.local_addr().unwrap().port(), 0),
+        );
+
+        let state = wait_for_state(&app_state, |state| {
+            matches!(state, HostRuntimeState::Degraded { .. })
+        });
+        assert!(
+            matches!(state, HostRuntimeState::Degraded { reason } if reason.contains("listen failed"))
+        );
+
+        service.shutdown();
+        assert_eq!(app_state.snapshot(), HostRuntimeState::Stopping);
+    }
+
+    fn test_identity() -> IdentityPayload {
+        IdentityPayload {
+            vendor_id: 0x28DE,
+            product_id: 0x1304,
+            version_number: 2,
+            manufacturer: "Valve Software".to_string(),
+            product: "Steam Controller Puck".to_string(),
+            serial: "FXB9961303C9C".to_string(),
+            collections: vec![CollectionDescriptor {
+                role: CollectionRole::PuckMain,
+                interface_number: 2,
+                usage_page: 0x0001,
+                usage: 0x0002,
+                input_report_len: 54,
+                output_report_len: 64,
+                feature_report_len: 64,
+            }],
+        }
+    }
+
+    fn wait_for_state(
+        app_state: &AppState,
+        predicate: impl Fn(&HostRuntimeState) -> bool,
+    ) -> HostRuntimeState {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let state = app_state.snapshot();
+            if predicate(&state) || Instant::now() >= deadline {
+                return state;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
