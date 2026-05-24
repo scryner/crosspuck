@@ -1,4 +1,5 @@
 mod guest_driver;
+mod haptic_loop;
 
 use crosspuck_core::hid::{
     build_puck_snapshot, collect_candidates as collect_core_candidates, HidFilter,
@@ -75,6 +76,7 @@ impl Default for Config {
 enum CliError {
     Message(String),
     GuestDriver(guest_driver::GuestDriverError),
+    HapticLoop(haptic_loop::HapticLoopError),
     Hid(HidError),
     Io(std::io::Error),
     Json(serde_json::Error),
@@ -85,6 +87,7 @@ impl fmt::Display for CliError {
         match self {
             CliError::Message(message) => write!(f, "{message}"),
             CliError::GuestDriver(error) => write!(f, "{error}"),
+            CliError::HapticLoop(error) => write!(f, "{error}"),
             CliError::Hid(error) => write!(f, "{error}"),
             CliError::Io(error) => write!(f, "{error}"),
             CliError::Json(error) => write!(f, "{error}"),
@@ -95,6 +98,12 @@ impl fmt::Display for CliError {
 impl From<guest_driver::GuestDriverError> for CliError {
     fn from(value: guest_driver::GuestDriverError) -> Self {
         CliError::GuestDriver(value)
+    }
+}
+
+impl From<haptic_loop::HapticLoopError> for CliError {
+    fn from(value: haptic_loop::HapticLoopError) -> Self {
+        CliError::HapticLoop(value)
     }
 }
 
@@ -136,6 +145,10 @@ fn run() -> Result<()> {
     ) {
         args.remove(0);
         return guest_driver::run(args).map_err(Into::into);
+    }
+    if matches!(args.first().map(String::as_str), Some("haptic-loop")) {
+        args.remove(0);
+        return haptic_loop::run(args).map_err(Into::into);
     }
 
     let config = parse_args(args.into_iter())?;
@@ -288,11 +301,12 @@ fn print_help() {
         r#"crosspuck-host
 
 macOS 호스트에서 Steam Controller 계열 Valve HID 장치를 열고 Raw HID 패킷을 Hex로 출력합니다.
-또는 `guest-driver` 서브커맨드로 host app에 연결하는 로컬 guest smoke client를 실행합니다.
+또는 `guest-driver`/`haptic-loop` 서브커맨드로 host app에 연결하는 로컬 guest test client를 실행합니다.
 
 Usage:
   cargo run -- [options]
   cargo run -p crosspuck-cli -- guest-driver [options]
+  cargo run -p crosspuck-cli -- haptic-loop [options]
 
 Options:
   --list                 장치 목록만 출력하고 종료
@@ -318,6 +332,7 @@ Options:
   --min-packets <n>      verify 시 필요한 최소 packet 수 (기본값: 1)
   --quiet                캡처 중 packet별 콘솔 출력을 생략
   guest-driver           host app transport에 연결하는 local mock guest 실행
+  haptic-loop            버튼 입력 시 짧은 Triton rumble feedback을 보내는 local guest test 실행
   -h, --help             도움말 출력
 
 Examples:
@@ -333,6 +348,7 @@ Examples:
   cargo run -- --interface 1 --timeout-ms 250
   cargo run -p crosspuck-cli -- guest-driver --get-feature 2 0x02 64
   cargo run -p crosspuck-cli -- guest-driver --reports 1 --allow-input-timeout
+  cargo run -p crosspuck-cli -- haptic-loop --duration-ms 30000
 "#
     );
 }
