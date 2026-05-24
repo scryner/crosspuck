@@ -13,7 +13,7 @@ license = "MIT"
 
 [workspace.dependencies]
 crosspuck-core = { path = "crates/crosspuck-core" }
-hidapi = "2.6"
+hidapi = { version = "2.6", features = ["macos-shared-device"] }
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"

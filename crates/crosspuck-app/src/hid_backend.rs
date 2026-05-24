@@ -6,6 +6,7 @@ use crosspuck_core::protocol::{
     SetOutput, SetOutputResult, StatusCode, WriteReport, WriteResult,
 };
 use std::fmt;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const RUMBLE_STOP: [u8; 10] = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
@@ -36,11 +37,25 @@ pub(crate) struct InputDescriptor {
 pub(crate) struct RealHostBackend {
     snapshot: PuckSnapshot,
     identity: IdentityPayload,
+    main: SharedMainDevice,
+}
+
+#[derive(Clone, Debug)]
+struct SharedMainDevice {
+    interface_number: u8,
+    input_report_len: u16,
+    path: String,
+    device: Arc<Mutex<HidDevice>>,
 }
 
 impl RealHostBackend {
-    pub fn new(snapshot: PuckSnapshot, identity: IdentityPayload) -> Self {
-        Self { snapshot, identity }
+    pub fn new(snapshot: PuckSnapshot, identity: IdentityPayload) -> Result<Self, HostHidError> {
+        let main = Self::open_main_device(&snapshot)?;
+        Ok(Self {
+            snapshot,
+            identity,
+            main,
+        })
     }
 
     fn path_for_interface(&self, interface_number: u8) -> Option<&str> {
@@ -51,26 +66,62 @@ impl RealHostBackend {
             .map(|collection| collection.path.as_str())
     }
 
-    fn main_collection(&self) -> Result<(&str, u16, InputDescriptor), HostHidError> {
-        let collection = self
-            .snapshot
+    fn open_main_device(snapshot: &PuckSnapshot) -> Result<SharedMainDevice, HostHidError> {
+        let collection = snapshot
             .collections
             .iter()
             .find(|collection| collection.role == HidCollectionRole::PuckMain)
             .ok_or(HostHidError::MissingCollection(HidCollectionRole::PuckMain))?;
         let interface_number = u8::try_from(collection.interface_number)
             .map_err(|_| HostHidError::InvalidInterfaceNumber(collection.interface_number))?;
-        Ok((
-            collection.path.as_str(),
-            collection.input_report_len,
-            InputDescriptor {
-                interface_number,
-                role: CollectionRole::PuckMain,
-            },
-        ))
+        let device = open_path_with_new_api(&collection.path)?;
+        Ok(SharedMainDevice {
+            interface_number,
+            input_report_len: collection.input_report_len,
+            path: collection.path.clone(),
+            device: Arc::new(Mutex::new(device)),
+        })
+    }
+
+    fn main_descriptor(&self) -> InputDescriptor {
+        InputDescriptor {
+            interface_number: self.main.interface_number,
+            role: CollectionRole::PuckMain,
+        }
+    }
+
+    fn is_main_interface(&self, interface_number: u8) -> bool {
+        interface_number == self.main.interface_number
     }
 
     fn write_raw(&self, interface_number: u8, data: &[u8]) -> WriteResult {
+        if self.is_main_interface(interface_number) {
+            return match self.main.device.lock() {
+                Ok(device) => match device.write(data) {
+                    Ok(written) => WriteResult {
+                        status: StatusCode::Ok,
+                        bytes_written: saturating_u16(written),
+                        os_error: 0,
+                    },
+                    Err(error) => {
+                        eprintln!(
+                            "CrossPuck HID write failed: interface={} path={} len={} error={}",
+                            interface_number,
+                            self.main.path,
+                            data.len(),
+                            error
+                        );
+                        hid_write_error(error.into())
+                    }
+                },
+                Err(_) => WriteResult {
+                    status: StatusCode::HidIoError,
+                    bytes_written: 0,
+                    os_error: 0,
+                },
+            };
+        }
+
         let Some(path) = self.path_for_interface(interface_number) else {
             return WriteResult {
                 status: StatusCode::UnsupportedInterface,
@@ -86,7 +137,16 @@ impl RealHostBackend {
                 bytes_written: saturating_u16(written),
                 os_error: 0,
             },
-            Err(error) => hid_write_error(error),
+            Err(error) => {
+                eprintln!(
+                    "CrossPuck HID write failed: interface={} path={} len={} error={}",
+                    interface_number,
+                    path,
+                    data.len(),
+                    error
+                );
+                hid_write_error(error)
+            }
         }
     }
 }
@@ -97,15 +157,13 @@ impl HostBackend for RealHostBackend {
     }
 
     fn input_descriptor(&self) -> Result<InputDescriptor, HostHidError> {
-        self.main_collection().map(|(_, _, descriptor)| descriptor)
+        Ok(self.main_descriptor())
     }
 
     fn open_input_reader(&self) -> Result<Box<dyn InputReportReader>, HostHidError> {
-        let (path, input_report_len, _) = self.main_collection()?;
-        let device = open_path_with_new_api(path)?;
-        Ok(Box::new(RealInputReportReader {
-            device,
-            buffer: vec![0_u8; usize::from(input_report_len).max(64)],
+        Ok(Box::new(SharedInputReportReader {
+            device: Arc::clone(&self.main.device),
+            buffer: vec![0_u8; usize::from(self.main.input_report_len).max(64)],
         }))
     }
 
@@ -135,11 +193,21 @@ impl HostBackend for RealHostBackend {
                 os_error: 0,
                 data: buffer[..read.min(buffer.len())].to_vec(),
             },
-            Err(_) => FeatureResult {
-                status: StatusCode::HidIoError,
-                os_error: 0,
-                data: Vec::new(),
-            },
+            Err(error) => {
+                eprintln!(
+                    "CrossPuck HID get_feature failed: interface={} path={} report_id=0x{:02X} len={} error={}",
+                    request.interface_number,
+                    path,
+                    request.report_id,
+                    request.requested_len,
+                    error
+                );
+                FeatureResult {
+                    status: StatusCode::HidIoError,
+                    os_error: 0,
+                    data: Vec::new(),
+                }
+            }
         }
     }
 
@@ -163,11 +231,20 @@ impl HostBackend for RealHostBackend {
                 bytes_accepted: saturating_u16(accepted),
                 os_error: 0,
             },
-            Err(_) => SetFeatureResult {
-                status: StatusCode::HidIoError,
-                bytes_accepted: 0,
-                os_error: 0,
-            },
+            Err(error) => {
+                eprintln!(
+                    "CrossPuck HID set_feature failed: interface={} path={} len={} error={}",
+                    request.interface_number,
+                    path,
+                    request.data.len(),
+                    error
+                );
+                SetFeatureResult {
+                    status: StatusCode::HidIoError,
+                    bytes_accepted: 0,
+                    os_error: 0,
+                }
+            }
         }
     }
 
@@ -185,26 +262,26 @@ impl HostBackend for RealHostBackend {
     }
 
     fn cleanup_feedback(&self) {
-        let Ok((path, _, _)) = self.main_collection() else {
-            return;
-        };
-        if let Ok(device) = open_path_with_new_api(path) {
+        if let Ok(device) = self.main.device.lock() {
             let _ = device.write(&RUMBLE_STOP);
             let _ = device.write(&COMMAND_OFF);
         }
     }
 }
 
-struct RealInputReportReader {
-    device: HidDevice,
+struct SharedInputReportReader {
+    device: Arc<Mutex<HidDevice>>,
     buffer: Vec<u8>,
 }
 
-impl InputReportReader for RealInputReportReader {
+impl InputReportReader for SharedInputReportReader {
     fn read_report(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, HostHidError> {
         let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-        match self
+        let device = self
             .device
+            .lock()
+            .map_err(|_| HostHidError::DeviceLockPoisoned)?;
+        match device
             .read_timeout(&mut self.buffer, timeout_ms)
             .map_err(HidSnapshotError::from)?
         {
@@ -230,6 +307,7 @@ fn hid_write_error(_error: HidSnapshotError) -> WriteResult {
 pub(crate) enum HostHidError {
     MissingCollection(HidCollectionRole),
     InvalidInterfaceNumber(i32),
+    DeviceLockPoisoned,
     Hid(HidSnapshotError),
 }
 
@@ -240,6 +318,7 @@ impl fmt::Display for HostHidError {
             Self::InvalidInterfaceNumber(interface_number) => {
                 write!(f, "invalid HID interface number: {interface_number}")
             }
+            Self::DeviceLockPoisoned => write!(f, "HID device lock poisoned"),
             Self::Hid(error) => write!(f, "{error}"),
         }
     }

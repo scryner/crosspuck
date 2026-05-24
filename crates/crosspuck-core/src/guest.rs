@@ -1,8 +1,8 @@
 use crate::protocol::{
-    Channel, FeatureResult, Frame, GetFeature, Hello, HelloOk, IdentityPayload, InputAttach,
-    InputAttachOk, InputQueueStats, InputReport, InputReportQueue, MessageType, ProtocolError,
-    QueuedInputReport, SetFeature, SetFeatureResult, SetOutput, SetOutputResult, StatusCode,
-    WireDecode, WirePayload, WriteReport, WriteResult, PROTOCOL_VERSION,
+    Channel, FeatureResult, Frame, FrameIoError, GetFeature, Hello, HelloOk, IdentityPayload,
+    InputAttach, InputAttachOk, InputQueueStats, InputReport, InputReportQueue, MessageType,
+    ProtocolError, QueuedInputReport, SetFeature, SetFeatureResult, SetOutput, SetOutputResult,
+    StatusCode, WireDecode, WirePayload, WriteReport, WriteResult, PROTOCOL_VERSION,
 };
 use crate::transport::{ChannelStream, TransportAddrs, TransportError};
 use std::fmt;
@@ -100,66 +100,123 @@ impl GuestTransportClient {
         }
 
         Ok(GuestSession {
-            control,
-            input,
-            identity,
-            session_id,
-            next_request_id,
-            input_queue: InputReportQueue::default(),
-            _guest_label: config.guest_label,
+            info: GuestSessionInfo {
+                identity,
+                session_id,
+                guest_label: config.guest_label,
+            },
+            control: GuestControl {
+                control,
+                next_request_id,
+            },
+            input: GuestInput {
+                input,
+                input_queue: InputReportQueue::default(),
+            },
         })
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct GuestSessionInfo {
+    pub identity: IdentityPayload,
+    pub session_id: u32,
+    pub guest_label: String,
+}
+
 pub struct GuestSession {
-    control: ChannelStream,
-    input: ChannelStream,
-    identity: IdentityPayload,
-    session_id: u32,
-    next_request_id: u32,
-    input_queue: InputReportQueue,
-    _guest_label: String,
+    info: GuestSessionInfo,
+    control: GuestControl,
+    input: GuestInput,
 }
 
 impl GuestSession {
     pub fn identity(&self) -> &IdentityPayload {
-        &self.identity
+        &self.info.identity
     }
 
     pub fn session_id(&self) -> u32 {
-        self.session_id
+        self.info.session_id
+    }
+
+    pub fn guest_label(&self) -> &str {
+        &self.info.guest_label
     }
 
     pub fn input_queue_len(&self) -> usize {
-        self.input_queue.len()
+        self.input.input_queue_len()
     }
 
     pub fn input_queue_stats(&self) -> InputQueueStats {
-        self.input_queue.stats()
+        self.input.input_queue_stats()
     }
 
     pub fn read_input_report(&mut self) -> Result<QueuedInputReport, GuestError> {
-        if let Some(report) = self.input_queue.pop() {
-            return Ok(report);
-        }
-
-        let frame = self.input.read_frame()?;
-        match frame.header.message_type {
-            MessageType::InputReport => {
-                let report = InputReport::decode(&frame.payload)?;
-                let queued = QueuedInputReport::from_wire(frame.header.id, report);
-                self.input_queue.push(queued);
-                self.input_queue
-                    .pop()
-                    .ok_or(GuestError::InputQueueUnexpectedlyEmpty)
-            }
-            actual => Err(GuestError::UnexpectedMessage {
-                expected: MessageType::InputReport,
-                actual,
-            }),
-        }
+        self.input.read_input_report()
     }
 
+    pub fn get_feature(
+        &mut self,
+        interface_number: u8,
+        report_id: u8,
+        requested_len: u16,
+        timeout_ms: u16,
+    ) -> Result<FeatureResult, GuestError> {
+        self.control
+            .get_feature(interface_number, report_id, requested_len, timeout_ms)
+    }
+
+    pub fn set_feature(
+        &mut self,
+        interface_number: u8,
+        timeout_ms: u16,
+        payload: &[u8],
+    ) -> Result<SetFeatureResult, GuestError> {
+        self.control
+            .set_feature(interface_number, timeout_ms, payload)
+    }
+
+    pub fn set_output(
+        &mut self,
+        interface_number: u8,
+        timeout_ms: u16,
+        payload: &[u8],
+    ) -> Result<SetOutputResult, GuestError> {
+        self.control
+            .set_output(interface_number, timeout_ms, payload)
+    }
+
+    pub fn write_report(
+        &mut self,
+        interface_number: u8,
+        timeout_ms: u16,
+        payload: &[u8],
+    ) -> Result<WriteResult, GuestError> {
+        self.control
+            .write_report(interface_number, timeout_ms, payload)
+    }
+
+    pub fn into_parts(self) -> GuestSessionParts {
+        GuestSessionParts {
+            info: self.info,
+            control: self.control,
+            input: self.input,
+        }
+    }
+}
+
+pub struct GuestSessionParts {
+    pub info: GuestSessionInfo,
+    pub control: GuestControl,
+    pub input: GuestInput,
+}
+
+pub struct GuestControl {
+    control: ChannelStream,
+    next_request_id: u32,
+}
+
+impl GuestControl {
     pub fn get_feature(
         &mut self,
         interface_number: u8,
@@ -238,6 +295,43 @@ impl GuestSession {
     }
 }
 
+pub struct GuestInput {
+    input: ChannelStream,
+    input_queue: InputReportQueue,
+}
+
+impl GuestInput {
+    pub fn input_queue_len(&self) -> usize {
+        self.input_queue.len()
+    }
+
+    pub fn input_queue_stats(&self) -> InputQueueStats {
+        self.input_queue.stats()
+    }
+
+    pub fn read_input_report(&mut self) -> Result<QueuedInputReport, GuestError> {
+        if let Some(report) = self.input_queue.pop() {
+            return Ok(report);
+        }
+
+        let frame = self.input.read_frame()?;
+        match frame.header.message_type {
+            MessageType::InputReport => {
+                let report = InputReport::decode(&frame.payload)?;
+                let queued = QueuedInputReport::from_wire(frame.header.id, report);
+                self.input_queue.push(queued);
+                self.input_queue
+                    .pop()
+                    .ok_or(GuestError::InputQueueUnexpectedlyEmpty)
+            }
+            actual => Err(GuestError::UnexpectedMessage {
+                expected: MessageType::InputReport,
+                actual,
+            }),
+        }
+    }
+}
+
 fn write_payload<T: WirePayload>(
     stream: &mut ChannelStream,
     id: u32,
@@ -304,6 +398,22 @@ impl fmt::Display for GuestError {
             Self::NonOkStatus(status) => write!(f, "non-ok status: {status}"),
             Self::InputQueueUnexpectedlyEmpty => f.write_str("input queue unexpectedly empty"),
         }
+    }
+}
+
+impl GuestError {
+    pub fn is_timeout_or_would_block(&self) -> bool {
+        matches!(
+            self,
+            Self::Transport(TransportError::Io(io_error))
+                if io_error.kind() == std::io::ErrorKind::WouldBlock
+                    || io_error.kind() == std::io::ErrorKind::TimedOut
+        ) || matches!(
+            self,
+            Self::Transport(TransportError::Frame(FrameIoError::Io(io_error)))
+                if io_error.kind() == std::io::ErrorKind::WouldBlock
+                    || io_error.kind() == std::io::ErrorKind::TimedOut
+        )
     }
 }
 

@@ -291,7 +291,7 @@ fn handle_session(
         }
     };
     let identity = IdentityPayload::try_from(&snapshot)?;
-    let backend = Arc::new(RealHostBackend::new(snapshot, identity));
+    let backend = Arc::new(RealHostBackend::new(snapshot, identity)?);
     handle_session_with_backend(
         listeners,
         control,
@@ -402,19 +402,48 @@ fn run_control_loop(
         match frame.header.message_type {
             MessageType::GetFeature => {
                 let request = GetFeature::decode(&frame.payload)?;
-                write_payload(control, frame.header.id, &backend.get_feature(&request))?;
+                let result = backend.get_feature(&request);
+                eprintln!(
+                    "CrossPuck GET_FEATURE id={} interface={} report_id=0x{:02X} status={}",
+                    frame.header.id, request.interface_number, request.report_id, result.status
+                );
+                write_payload(control, frame.header.id, &result)?;
             }
             MessageType::SetFeature => {
                 let request = SetFeature::decode(&frame.payload)?;
-                write_payload(control, frame.header.id, &backend.set_feature(&request))?;
+                let result = backend.set_feature(&request);
+                eprintln!(
+                    "CrossPuck SET_FEATURE id={} interface={} len={} status={}",
+                    frame.header.id,
+                    request.interface_number,
+                    request.data.len(),
+                    result.status
+                );
+                write_payload(control, frame.header.id, &result)?;
             }
             MessageType::SetOutput => {
                 let request = SetOutput::decode(&frame.payload)?;
-                write_payload(control, frame.header.id, &backend.set_output(&request))?;
+                let result = backend.set_output(&request);
+                eprintln!(
+                    "CrossPuck SET_OUTPUT id={} interface={} len={} status={}",
+                    frame.header.id,
+                    request.interface_number,
+                    request.data.len(),
+                    result.status
+                );
+                write_payload(control, frame.header.id, &result)?;
             }
             MessageType::Write => {
                 let request = WriteReport::decode(&frame.payload)?;
-                write_payload(control, frame.header.id, &backend.write_report(&request))?;
+                let result = backend.write_report(&request);
+                eprintln!(
+                    "CrossPuck WRITE id={} interface={} len={} status={}",
+                    frame.header.id,
+                    request.interface_number,
+                    request.data.len(),
+                    result.status
+                );
+                write_payload(control, frame.header.id, &result)?;
             }
             actual => {
                 return Err(RuntimeError::UnexpectedControlMessage(actual));

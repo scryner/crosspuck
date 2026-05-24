@@ -5,23 +5,37 @@ use std::time::Duration;
 
 #[derive(Debug)]
 struct Config {
-    reports: usize,
     timeout_ms: u64,
-    get_feature: Option<(u8, u8, u16)>,
-    write: Option<(u8, Vec<u8>)>,
-    set_feature: Option<(u8, Vec<u8>)>,
-    set_output: Option<(u8, Vec<u8>)>,
+    operations: Vec<Operation>,
+}
+
+#[derive(Debug)]
+enum Operation {
+    Reports(usize),
+    GetFeature {
+        interface_number: u8,
+        report_id: u8,
+        len: u16,
+    },
+    Write {
+        interface_number: u8,
+        payload: Vec<u8>,
+    },
+    SetFeature {
+        interface_number: u8,
+        payload: Vec<u8>,
+    },
+    SetOutput {
+        interface_number: u8,
+        payload: Vec<u8>,
+    },
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            reports: 0,
             timeout_ms: 2_000,
-            get_feature: None,
-            write: None,
-            set_feature: None,
-            set_output: None,
+            operations: Vec::new(),
         }
     }
 }
@@ -37,45 +51,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     print_identity(&session);
 
-    for _ in 0..config.reports {
-        let report = session.read_input_report()?;
-        println!(
-            "INPUT seq={} interface={} role={:?} len={} head={}",
-            report.sequence,
-            report.interface_number,
-            report.role,
-            report.data.len(),
-            hex_head(&report.data, 16)
-        );
-    }
-
-    if let Some((interface_number, report_id, len)) = config.get_feature {
-        let result =
-            session.get_feature(interface_number, report_id, len, config.timeout_ms as u16)?;
-        print_status("GET_FEATURE", result.status);
-        println!(
-            "FEATURE len={} head={}",
-            result.data.len(),
-            hex_head(&result.data, 32)
-        );
-    }
-
-    if let Some((interface_number, payload)) = config.write {
-        let result = session.write_report(interface_number, config.timeout_ms as u16, &payload)?;
-        print_status("WRITE", result.status);
-        println!("WRITE bytes_written={}", result.bytes_written);
-    }
-
-    if let Some((interface_number, payload)) = config.set_feature {
-        let result = session.set_feature(interface_number, config.timeout_ms as u16, &payload)?;
-        print_status("SET_FEATURE", result.status);
-        println!("SET_FEATURE bytes_accepted={}", result.bytes_accepted);
-    }
-
-    if let Some((interface_number, payload)) = config.set_output {
-        let result = session.set_output(interface_number, config.timeout_ms as u16, &payload)?;
-        print_status("SET_OUTPUT", result.status);
-        println!("SET_OUTPUT bytes_accepted={}", result.bytes_accepted);
+    for operation in &config.operations {
+        match operation {
+            Operation::Reports(count) => {
+                for _ in 0..*count {
+                    let report = session.read_input_report()?;
+                    println!(
+                        "INPUT seq={} interface={} role={:?} len={} head={}",
+                        report.sequence,
+                        report.interface_number,
+                        report.role,
+                        report.data.len(),
+                        hex_head(&report.data, 16)
+                    );
+                }
+            }
+            Operation::GetFeature {
+                interface_number,
+                report_id,
+                len,
+            } => {
+                let result = session.get_feature(
+                    *interface_number,
+                    *report_id,
+                    *len,
+                    config.timeout_ms as u16,
+                )?;
+                print_status("GET_FEATURE", result.status);
+                println!(
+                    "FEATURE os_error={} len={} head={}",
+                    result.os_error,
+                    result.data.len(),
+                    hex_head(&result.data, 32)
+                );
+            }
+            Operation::Write {
+                interface_number,
+                payload,
+            } => {
+                let result =
+                    session.write_report(*interface_number, config.timeout_ms as u16, payload)?;
+                print_status("WRITE", result.status);
+                println!(
+                    "WRITE os_error={} bytes_written={}",
+                    result.os_error, result.bytes_written
+                );
+            }
+            Operation::SetFeature {
+                interface_number,
+                payload,
+            } => {
+                let result =
+                    session.set_feature(*interface_number, config.timeout_ms as u16, payload)?;
+                print_status("SET_FEATURE", result.status);
+                println!(
+                    "SET_FEATURE os_error={} bytes_accepted={}",
+                    result.os_error, result.bytes_accepted
+                );
+            }
+            Operation::SetOutput {
+                interface_number,
+                payload,
+            } => {
+                let result =
+                    session.set_output(*interface_number, config.timeout_ms as u16, payload)?;
+                print_status("SET_OUTPUT", result.status);
+                println!(
+                    "SET_OUTPUT os_error={} bytes_accepted={}",
+                    result.os_error, result.bytes_accepted
+                );
+            }
+        }
     }
 
     Ok(())
@@ -116,7 +162,9 @@ fn parse_args() -> Result<Config, String> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--reports" => {
-                config.reports = parse_next(&mut args, "--reports")?;
+                config
+                    .operations
+                    .push(Operation::Reports(parse_next(&mut args, "--reports")?));
             }
             "--timeout-ms" => {
                 config.timeout_ms = parse_next(&mut args, "--timeout-ms")?;
@@ -125,22 +173,35 @@ fn parse_args() -> Result<Config, String> {
                 let interface_number = parse_next(&mut args, "--get-feature <interface>")?;
                 let report_id = parse_u8(&next_arg(&mut args, "--get-feature <report-id>")?)?;
                 let len = parse_next(&mut args, "--get-feature <len>")?;
-                config.get_feature = Some((interface_number, report_id, len));
+                config.operations.push(Operation::GetFeature {
+                    interface_number,
+                    report_id,
+                    len,
+                });
             }
             "--write-hex" => {
                 let interface_number = parse_next(&mut args, "--write-hex <interface>")?;
                 let payload = parse_hex(&next_arg(&mut args, "--write-hex <hex>")?)?;
-                config.write = Some((interface_number, payload));
+                config.operations.push(Operation::Write {
+                    interface_number,
+                    payload,
+                });
             }
             "--set-feature-hex" => {
                 let interface_number = parse_next(&mut args, "--set-feature-hex <interface>")?;
                 let payload = parse_hex(&next_arg(&mut args, "--set-feature-hex <hex>")?)?;
-                config.set_feature = Some((interface_number, payload));
+                config.operations.push(Operation::SetFeature {
+                    interface_number,
+                    payload,
+                });
             }
             "--set-output-hex" => {
                 let interface_number = parse_next(&mut args, "--set-output-hex <interface>")?;
                 let payload = parse_hex(&next_arg(&mut args, "--set-output-hex <hex>")?)?;
-                config.set_output = Some((interface_number, payload));
+                config.operations.push(Operation::SetOutput {
+                    interface_number,
+                    payload,
+                });
             }
             "--help" | "-h" => {
                 print_help();
@@ -169,6 +230,8 @@ Options:
   --write-hex <interface> <hex>         send WRITE bytes
   --set-feature-hex <interface> <hex>   send SET_FEATURE bytes
   --set-output-hex <interface> <hex>    send SET_OUTPUT bytes
+
+Operations run in CLI argument order.
 "#
     );
 }

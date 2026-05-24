@@ -1,7 +1,9 @@
+pub mod host_bridge;
 pub mod replay;
 
 #[cfg(windows)]
 mod windows_proxy {
+    use crate::host_bridge::{HostBridge, HostBridgeConfig};
     use crate::replay::{ReplayPlayer, ReplayScript};
     use min_hook_rs::{create_hook_api, enable_hook, initialize};
     use std::cell::Cell;
@@ -293,6 +295,7 @@ mod windows_proxy {
     static SDL_AUGMENTED_ENUMERATIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
     static SDL_FEATURE_COMMANDS: OnceLock<Mutex<Vec<SdlFeatureCommand>>> = OnceLock::new();
     static PENDING_INPUT_REPORTS: OnceLock<Mutex<VecDeque<PendingInputReport>>> = OnceLock::new();
+    static HOST_BRIDGE: OnceLock<HostBridge> = OnceLock::new();
     static CREATE_FILE_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GET_PROC_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
     static VIRTUAL_IO_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -352,6 +355,9 @@ mod windows_proxy {
         window_watchdog_start_delay: Duration,
         window_watchdog_no_visible_grace: Duration,
         window_watchdog_interval: Duration,
+        host_bridge_enabled: bool,
+        host_bridge_connect_timeout: Duration,
+        host_bridge_io_timeout: Duration,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -543,6 +549,11 @@ mod windows_proxy {
                 "CROSSPUCK_WINDOW_WATCHDOG_INTERVAL_MS",
                 DEFAULT_WINDOW_WATCHDOG_INTERVAL_MS,
             ));
+            let host_bridge_enabled = env_bool("CROSSPUCK_HOST_BRIDGE", false);
+            let host_bridge_connect_timeout =
+                Duration::from_millis(env_u64("CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS", 2_000));
+            let host_bridge_io_timeout =
+                Duration::from_millis(env_u64("CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS", 50));
 
             Self {
                 replay_enabled,
@@ -568,6 +579,9 @@ mod windows_proxy {
                 window_watchdog_start_delay,
                 window_watchdog_no_visible_grace,
                 window_watchdog_interval,
+                host_bridge_enabled,
+                host_bridge_connect_timeout,
+                host_bridge_io_timeout,
             }
         }
     }
@@ -707,12 +721,19 @@ mod windows_proxy {
             config.window_watchdog_interval.as_millis()
         ));
         debug_line(&format!(
+            "[crosspuck] host_bridge enabled={} connect_timeout_ms={} io_timeout_ms={}",
+            config.host_bridge_enabled,
+            config.host_bridge_connect_timeout.as_millis(),
+            config.host_bridge_io_timeout.as_millis()
+        ));
+        debug_line(&format!(
             "[crosspuck] virtual identity vid=0x{VIRTUAL_VENDOR_ID:04X} pid=0x{VIRTUAL_PRODUCT_ID:04X} version=0x{VIRTUAL_VERSION_NUMBER:04X} manufacturer={VIRTUAL_MANUFACTURER:?} product={VIRTUAL_PRODUCT:?} serial={VIRTUAL_SERIAL:?}"
         ));
 
         CONFIG
             .set(config.clone())
             .map_err(|_| "runtime config already initialized".to_string())?;
+        initialize_host_bridge(&config);
         VIRTUAL_STREAM_CONNECTED.store(true, Ordering::Relaxed);
         let replay_script =
             ReplayScript::from_jsonl(EMBEDDED_REPLAY_JSONL).map_err(|error| error.to_string())?;
@@ -822,6 +843,36 @@ mod windows_proxy {
             config.replay_delay.as_millis()
         ));
         Ok(())
+    }
+
+    fn initialize_host_bridge(config: &RuntimeConfig) {
+        if !config.host_bridge_enabled {
+            return;
+        }
+
+        match HostBridge::connect(HostBridgeConfig {
+            connect_timeout: config.host_bridge_connect_timeout,
+            io_timeout: config.host_bridge_io_timeout,
+            ..HostBridgeConfig::default()
+        }) {
+            Ok(bridge) => {
+                let identity = &bridge.info().identity;
+                debug_line(&format!(
+                    "[crosspuck] host bridge connected session={} vid=0x{:04X} pid=0x{:04X} serial={:?} product={:?}",
+                    bridge.info().session_id,
+                    identity.vendor_id,
+                    identity.product_id,
+                    identity.serial,
+                    identity.product
+                ));
+                if HOST_BRIDGE.set(bridge).is_err() {
+                    debug_line("[crosspuck] host bridge already initialized");
+                }
+            }
+            Err(error) => {
+                debug_line(&format!("[crosspuck] host bridge connect failed: {error}"));
+            }
+        }
     }
 
     fn install_hook<F>(
@@ -1448,6 +1499,29 @@ mod windows_proxy {
                 buffer as *const u8,
                 bytes_to_write,
             );
+            if let Some(profile) = virtual_profile_for_handle(file) {
+                if let Some(result) = host_bridge_write_report(profile, buffer, bytes_to_write) {
+                    return match result {
+                        Ok(written) => {
+                            if !bytes_written.is_null() {
+                                *bytes_written = u32::from(written);
+                            }
+                            TRUE
+                        }
+                        Err(error) => {
+                            debug_line(&format!(
+                                "[crosspuck] host bridge WriteFile failed handle={} error={error}",
+                                handle_label(file)
+                            ));
+                            if !bytes_written.is_null() {
+                                *bytes_written = 0;
+                            }
+                            SetLastError(ERROR_DEVICE_NOT_CONNECTED_CODE);
+                            FALSE
+                        }
+                    };
+                }
+            }
             if !bytes_written.is_null() {
                 *bytes_written = bytes_to_write;
             }
@@ -1769,6 +1843,21 @@ mod windows_proxy {
                 len,
                 hex_head(data, len as u32)
             ));
+            if let Some(profile) = virtual_profile_for_fake_sdl_device(device) {
+                if let Some(result) =
+                    host_bridge_write_report(profile, data as *const c_void, len as u32)
+                {
+                    return match result {
+                        Ok(written) => written.min(c_int::MAX as u16) as c_int,
+                        Err(error) => {
+                            debug_line(&format!(
+                                "[crosspuck] host bridge SDL_hid_write failed device={device:p} error={error}"
+                            ));
+                            -1
+                        }
+                    };
+                }
+            }
             return len.min(c_int::MAX as usize) as c_int;
         }
 
@@ -1784,6 +1873,21 @@ mod windows_proxy {
         len: usize,
     ) -> c_int {
         if is_sdl_virtual_hid_device(device) {
+            if let Some(profile) = virtual_profile_for_fake_sdl_device(device) {
+                if let Some(result) =
+                    host_bridge_feature_report(profile, data as *mut c_void, len as u32)
+                {
+                    return match result {
+                        Ok(read) => read.min(c_int::MAX as usize) as c_int,
+                        Err(error) => {
+                            debug_line(&format!(
+                                "[crosspuck] host bridge SDL_hid_get_feature_report failed device={device:p} error={error}"
+                            ));
+                            -1
+                        }
+                    };
+                }
+            }
             return synthesize_sdl_feature_report("SDL_hid_get_feature_report", device, data, len);
         }
 
@@ -1804,6 +1908,21 @@ mod windows_proxy {
                 len,
                 hex_head(data, len as u32)
             ));
+            if let Some(profile) = virtual_profile_for_fake_sdl_device(device) {
+                if let Some(result) =
+                    host_bridge_set_feature(profile, data as *const c_void, len as u32)
+                {
+                    return match result {
+                        Ok(accepted) => accepted.min(c_int::MAX as u16) as c_int,
+                        Err(error) => {
+                            debug_line(&format!(
+                                "[crosspuck] host bridge SDL_hid_send_feature_report failed device={device:p} error={error}"
+                            ));
+                            -1
+                        }
+                    };
+                }
+            }
             remember_sdl_feature_command(device, data, len);
             return len.min(c_int::MAX as usize) as c_int;
         }
@@ -2732,6 +2851,32 @@ mod windows_proxy {
                 report_buffer as *const u8,
                 report_buffer_len,
             );
+            if let Some(profile) = virtual_profile_for_handle(device) {
+                if let Some(result) =
+                    host_bridge_feature_report(profile, report_buffer, report_buffer_len)
+                {
+                    return match result {
+                        Ok(read) => {
+                            trace_virtual_report(
+                                "HidD_GetFeature",
+                                "response",
+                                device,
+                                report_buffer as *const u8,
+                                read.min(report_buffer_len as usize) as u32,
+                            );
+                            TRUE_U8
+                        }
+                        Err(error) => {
+                            debug_line(&format!(
+                                "[crosspuck] host bridge HidD_GetFeature failed handle={} error={error}",
+                                handle_label(device)
+                            ));
+                            SetLastError(ERROR_DEVICE_NOT_CONNECTED_CODE);
+                            FALSE_U8
+                        }
+                    };
+                }
+            }
             let report_id = report_id_from_buffer(report_buffer as *const u8, report_buffer_len);
             zero_buffer_with_report_id(report_buffer, report_buffer_len, report_id);
             trace_virtual_report(
@@ -2765,6 +2910,25 @@ mod windows_proxy {
                 report_buffer as *const u8,
                 report_buffer_len,
             );
+            if let Some(profile) = virtual_profile_for_handle(device) {
+                if let Some(result) = host_bridge_set_feature(
+                    profile,
+                    report_buffer as *const c_void,
+                    report_buffer_len,
+                ) {
+                    return match result {
+                        Ok(_) => TRUE_U8,
+                        Err(error) => {
+                            debug_line(&format!(
+                                "[crosspuck] host bridge HidD_SetFeature failed handle={} error={error}",
+                                handle_label(device)
+                            ));
+                            SetLastError(ERROR_DEVICE_NOT_CONNECTED_CODE);
+                            FALSE_U8
+                        }
+                    };
+                }
+            }
             return TRUE_U8;
         }
         call_real_hidd_report("HidD_SetFeature", device, report_buffer, report_buffer_len)
@@ -2789,6 +2953,25 @@ mod windows_proxy {
                 report_buffer as *const u8,
                 report_buffer_len,
             );
+            if let Some(profile) = virtual_profile_for_handle(device) {
+                if let Some(result) = host_bridge_set_output(
+                    profile,
+                    report_buffer as *const c_void,
+                    report_buffer_len,
+                ) {
+                    return match result {
+                        Ok(_) => TRUE_U8,
+                        Err(error) => {
+                            debug_line(&format!(
+                                "[crosspuck] host bridge HidD_SetOutputReport failed handle={} error={error}",
+                                handle_label(device)
+                            ));
+                            SetLastError(ERROR_DEVICE_NOT_CONNECTED_CODE);
+                            FALSE_U8
+                        }
+                    };
+                }
+            }
             return TRUE_U8;
         }
         call_real_hidd_report(
@@ -2904,6 +3087,12 @@ mod windows_proxy {
             return TRUE;
         }
 
+        if let Some(result) =
+            read_host_bridge_input_report(profile, buffer, bytes_to_read, bytes_read)
+        {
+            return result;
+        }
+
         if let Some(result) = read_pending_input_report(profile, buffer, bytes_to_read, bytes_read)
         {
             return result;
@@ -2970,6 +3159,10 @@ mod windows_proxy {
             return Ok(None);
         }
 
+        if let Some(result) = read_host_bridge_input_report_ready(profile, buffer, bytes_to_read) {
+            return result;
+        }
+
         let mut bytes_read = 0_u32;
         if let Some(result) =
             read_pending_input_report(profile, buffer, bytes_to_read, &mut bytes_read as *mut u32)
@@ -2990,6 +3183,85 @@ mod windows_proxy {
         };
 
         read_player_report_ready("replay", player, buffer, bytes_to_read)
+    }
+
+    fn read_host_bridge_input_report(
+        profile: VirtualHidProfile,
+        buffer: *mut c_void,
+        bytes_to_read: u32,
+        bytes_read: *mut u32,
+    ) -> Option<BOOL> {
+        let bridge = host_bridge()?;
+        if buffer.is_null() {
+            return Some(FALSE);
+        }
+
+        let output =
+            unsafe { slice::from_raw_parts_mut(buffer as *mut u8, bytes_to_read as usize) };
+        match bridge.copy_next_input_report(profile.interface_number(), output) {
+            Ok(Some(count)) => {
+                if !bytes_read.is_null() {
+                    unsafe {
+                        *bytes_read = count as u32;
+                    }
+                }
+                debug_line(&format!(
+                    "[crosspuck] host bridge input read profile={} requested={} returned={} head={}",
+                    profile.label(),
+                    bytes_to_read,
+                    count,
+                    unsafe { hex_head(buffer as *const u8, count.min(16) as u32) }
+                ));
+                Some(TRUE)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                debug_line(&format!(
+                    "[crosspuck] host bridge input read failed profile={} error={error}",
+                    profile.label()
+                ));
+                if !bytes_read.is_null() {
+                    unsafe {
+                        *bytes_read = 0;
+                    }
+                }
+                Some(FALSE)
+            }
+        }
+    }
+
+    fn read_host_bridge_input_report_ready(
+        profile: VirtualHidProfile,
+        buffer: *mut c_void,
+        bytes_to_read: u32,
+    ) -> Option<Result<Option<usize>, ()>> {
+        let bridge = host_bridge()?;
+        if buffer.is_null() {
+            return Some(Err(()));
+        }
+
+        let output =
+            unsafe { slice::from_raw_parts_mut(buffer as *mut u8, bytes_to_read as usize) };
+        match bridge.copy_next_input_report(profile.interface_number(), output) {
+            Ok(Some(count)) => {
+                debug_line(&format!(
+                    "[crosspuck] host bridge input ready profile={} requested={} returned={} head={}",
+                    profile.label(),
+                    bytes_to_read,
+                    count,
+                    unsafe { hex_head(buffer as *const u8, count.min(16) as u32) }
+                ));
+                Some(Ok(Some(count)))
+            }
+            Ok(None) => None,
+            Err(error) => {
+                debug_line(&format!(
+                    "[crosspuck] host bridge input ready failed profile={} error={error}",
+                    profile.label()
+                ));
+                Some(Err(()))
+            }
+        }
     }
 
     fn read_pending_input_report(
@@ -3321,6 +3593,120 @@ mod windows_proxy {
 
     fn virtual_stream_connected() -> bool {
         VIRTUAL_STREAM_CONNECTED.load(Ordering::Relaxed)
+    }
+
+    fn host_bridge() -> Option<&'static HostBridge> {
+        if CONFIG
+            .get()
+            .is_some_and(|config| config.host_bridge_enabled)
+        {
+            HOST_BRIDGE.get()
+        } else {
+            None
+        }
+    }
+
+    fn host_bridge_command_timeout_ms() -> u16 {
+        CONFIG
+            .get()
+            .map(|config| {
+                config
+                    .host_bridge_connect_timeout
+                    .as_millis()
+                    .min(u128::from(u16::MAX)) as u16
+            })
+            .unwrap_or(2_000)
+    }
+
+    unsafe fn host_bridge_feature_report(
+        profile: VirtualHidProfile,
+        buffer: *mut c_void,
+        buffer_len: u32,
+    ) -> Option<Result<usize, String>> {
+        let bridge = host_bridge()?;
+        if buffer.is_null() {
+            return Some(Err("null report buffer".to_string()));
+        }
+
+        let report_id = report_id_from_buffer(buffer as *const u8, buffer_len);
+        let output = slice::from_raw_parts_mut(buffer as *mut u8, buffer_len as usize);
+        Some(
+            bridge
+                .copy_feature_report(
+                    profile.interface_number(),
+                    report_id,
+                    output,
+                    host_bridge_command_timeout_ms(),
+                )
+                .map_err(|error| error.to_string()),
+        )
+    }
+
+    unsafe fn host_bridge_write_report(
+        profile: VirtualHidProfile,
+        buffer: *const c_void,
+        buffer_len: u32,
+    ) -> Option<Result<u16, String>> {
+        let bridge = host_bridge()?;
+        let payload = host_bridge_payload(buffer, buffer_len)?;
+        Some(
+            bridge
+                .write_report(
+                    profile.interface_number(),
+                    payload,
+                    host_bridge_command_timeout_ms(),
+                )
+                .map_err(|error| error.to_string()),
+        )
+    }
+
+    unsafe fn host_bridge_set_feature(
+        profile: VirtualHidProfile,
+        buffer: *const c_void,
+        buffer_len: u32,
+    ) -> Option<Result<u16, String>> {
+        let bridge = host_bridge()?;
+        let payload = host_bridge_payload(buffer, buffer_len)?;
+        Some(
+            bridge
+                .set_feature(
+                    profile.interface_number(),
+                    payload,
+                    host_bridge_command_timeout_ms(),
+                )
+                .map_err(|error| error.to_string()),
+        )
+    }
+
+    unsafe fn host_bridge_set_output(
+        profile: VirtualHidProfile,
+        buffer: *const c_void,
+        buffer_len: u32,
+    ) -> Option<Result<u16, String>> {
+        let bridge = host_bridge()?;
+        let payload = host_bridge_payload(buffer, buffer_len)?;
+        Some(
+            bridge
+                .set_output(
+                    profile.interface_number(),
+                    payload,
+                    host_bridge_command_timeout_ms(),
+                )
+                .map_err(|error| error.to_string()),
+        )
+    }
+
+    unsafe fn host_bridge_payload<'a>(buffer: *const c_void, buffer_len: u32) -> Option<&'a [u8]> {
+        if buffer_len == 0 {
+            return Some(&[]);
+        }
+        if buffer.is_null() {
+            return None;
+        }
+        Some(slice::from_raw_parts(
+            buffer as *const u8,
+            buffer_len as usize,
+        ))
     }
 
     fn active_virtual_session() -> bool {
