@@ -3,6 +3,7 @@ members = [
     "crates/crosspuck-core",
     "crates/crosspuck-cli",
     "crates/crosspuck-app",
+    "crates/crosspuck-driver",
 ]
 resolver = "2"
 

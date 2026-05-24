@@ -1,0 +1,124 @@
+use super::{kernel32, setupapi};
+use min_hook_rs::{create_hook_api, enable_hook, initialize};
+use std::ffi::c_void;
+
+pub fn install() -> Result<(), String> {
+    initialize().map_err(|error| format!("minhook initialize failed: {error:?}"))?;
+    install_hook(
+        "kernel32.dll",
+        "CreateFileW",
+        kernel32::detoured_create_file_w as *mut c_void,
+        kernel32::set_original_create_file_w,
+    )?;
+    install_hook(
+        "kernel32.dll",
+        "CreateFileA",
+        kernel32::detoured_create_file_a as *mut c_void,
+        kernel32::set_original_create_file_a,
+    )?;
+    install_hook(
+        "kernel32.dll",
+        "ReadFile",
+        kernel32::detoured_read_file as *mut c_void,
+        kernel32::set_original_read_file,
+    )?;
+    install_hook(
+        "kernel32.dll",
+        "WriteFile",
+        kernel32::detoured_write_file as *mut c_void,
+        kernel32::set_original_write_file,
+    )?;
+    install_hook(
+        "kernel32.dll",
+        "CloseHandle",
+        kernel32::detoured_close_handle as *mut c_void,
+        kernel32::set_original_close_handle,
+    )?;
+    install_hook(
+        "kernel32.dll",
+        "DeviceIoControl",
+        kernel32::detoured_device_io_control as *mut c_void,
+        kernel32::set_original_device_io_control,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiGetClassDevsW",
+        setupapi::detoured_setupdi_get_class_devs_w as *mut c_void,
+        setupapi::set_original_setupdi_get_class_devs_w,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiGetClassDevsA",
+        setupapi::detoured_setupdi_get_class_devs_a as *mut c_void,
+        setupapi::set_original_setupdi_get_class_devs_a,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiEnumDeviceInterfaces",
+        setupapi::detoured_setupdi_enum_device_interfaces as *mut c_void,
+        setupapi::set_original_setupdi_enum_device_interfaces,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiGetDeviceInterfaceDetailW",
+        setupapi::detoured_setupdi_get_device_interface_detail_w as *mut c_void,
+        setupapi::set_original_setupdi_get_device_interface_detail_w,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiGetDeviceInterfaceDetailA",
+        setupapi::detoured_setupdi_get_device_interface_detail_a as *mut c_void,
+        setupapi::set_original_setupdi_get_device_interface_detail_a,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiEnumDeviceInfo",
+        setupapi::detoured_setupdi_enum_device_info as *mut c_void,
+        setupapi::set_original_setupdi_enum_device_info,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiGetDeviceRegistryPropertyW",
+        setupapi::detoured_setupdi_get_device_registry_property_w as *mut c_void,
+        setupapi::set_original_setupdi_get_device_registry_property_w,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiGetDeviceRegistryPropertyA",
+        setupapi::detoured_setupdi_get_device_registry_property_a as *mut c_void,
+        setupapi::set_original_setupdi_get_device_registry_property_a,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiGetDeviceInstanceIdW",
+        setupapi::detoured_setupdi_get_device_instance_id_w as *mut c_void,
+        setupapi::set_original_setupdi_get_device_instance_id_w,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiGetDeviceInstanceIdA",
+        setupapi::detoured_setupdi_get_device_instance_id_a as *mut c_void,
+        setupapi::set_original_setupdi_get_device_instance_id_a,
+    )?;
+    install_hook(
+        "setupapi.dll",
+        "SetupDiGetDevicePropertyW",
+        setupapi::detoured_setupdi_get_device_property_w as *mut c_void,
+        setupapi::set_original_setupdi_get_device_property_w,
+    )?;
+    Ok(())
+}
+
+fn install_hook(
+    module: &str,
+    proc_name: &str,
+    detour: *mut c_void,
+    set_original: impl FnOnce(*mut c_void) -> Result<(), String>,
+) -> Result<(), String> {
+    let (trampoline, target) = create_hook_api(module, proc_name, detour)
+        .map_err(|error| format!("create hook {module}!{proc_name} failed: {error:?}"))?;
+    set_original(trampoline)?;
+    enable_hook(target)
+        .map_err(|error| format!("enable hook {module}!{proc_name} failed: {error:?}"))?;
+    Ok(())
+}
