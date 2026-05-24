@@ -12,6 +12,7 @@ use std::time::Duration;
 pub struct GuestTransportConfig {
     pub addrs: TransportAddrs,
     pub connect_timeout: Duration,
+    pub handshake_timeout: Duration,
     pub io_timeout: Duration,
     pub guest_pid: u32,
     pub guest_label: String,
@@ -22,6 +23,7 @@ impl Default for GuestTransportConfig {
         Self {
             addrs: TransportAddrs::default(),
             connect_timeout: Duration::from_secs(2),
+            handshake_timeout: Duration::from_secs(2),
             io_timeout: Duration::from_secs(2),
             guest_pid: std::process::id(),
             guest_label: "crosspuck-guest".to_string(),
@@ -33,21 +35,44 @@ pub struct GuestTransportClient;
 
 impl GuestTransportClient {
     pub fn connect(config: GuestTransportConfig) -> Result<GuestSession, GuestError> {
-        let mut control = ChannelStream::connect_timeout(
-            Channel::Control,
-            config.addrs.control,
-            config.connect_timeout,
+        let mut control = at_stage(
+            "control connect",
+            ChannelStream::connect_timeout(
+                Channel::Control,
+                config.addrs.control,
+                config.connect_timeout,
+            )
+            .map_err(Into::into),
         )?;
-        control.set_read_timeout(Some(config.io_timeout))?;
-        control.set_write_timeout(Some(config.io_timeout))?;
+        at_stage(
+            "control set read timeout",
+            control
+                .set_read_timeout(Some(config.handshake_timeout))
+                .map_err(Into::into),
+        )?;
+        at_stage(
+            "control set write timeout",
+            control
+                .set_write_timeout(Some(config.handshake_timeout))
+                .map_err(Into::into),
+        )?;
 
         let mut next_request_id = 1;
         let hello_id = next_request_id;
         next_request_id += 1;
-        write_payload(&mut control, hello_id, &Hello::new(config.guest_pid))?;
+        at_stage(
+            "hello write",
+            write_payload(&mut control, hello_id, &Hello::new(config.guest_pid)),
+        )?;
 
-        let hello_ok_frame = control.read_frame()?;
-        let hello_ok = decode_expected::<HelloOk>(&hello_ok_frame)?;
+        let hello_ok_frame = at_stage(
+            "hello ok read",
+            control.read_frame().map_err(GuestError::from),
+        )?;
+        let hello_ok = at_stage(
+            "hello ok decode",
+            decode_expected::<HelloOk>(&hello_ok_frame),
+        )?;
         if hello_ok.protocol_version != PROTOCOL_VERSION as u16 {
             return Err(GuestError::ProtocolVersionMismatch {
                 expected: PROTOCOL_VERSION as u16,
@@ -64,31 +89,60 @@ impl GuestTransportClient {
             return Err(GuestError::NonOkStatus(hello_ok.status));
         }
 
-        let identity_frame = control.read_frame()?;
-        let identity = decode_expected::<IdentityPayload>(&identity_frame)?;
+        let identity_frame = at_stage(
+            "identity read",
+            control.read_frame().map_err(GuestError::from),
+        )?;
+        let identity = at_stage(
+            "identity decode",
+            decode_expected::<IdentityPayload>(&identity_frame),
+        )?;
         let session_id = hello_ok.session_id;
 
-        let mut input = ChannelStream::connect_timeout(
-            Channel::Input,
-            config.addrs.input,
-            config.connect_timeout,
+        let mut input = at_stage(
+            "input connect",
+            ChannelStream::connect_timeout(
+                Channel::Input,
+                config.addrs.input,
+                config.connect_timeout,
+            )
+            .map_err(Into::into),
         )?;
-        input.set_read_timeout(Some(config.io_timeout))?;
-        input.set_write_timeout(Some(config.io_timeout))?;
+        at_stage(
+            "input set read timeout",
+            input
+                .set_read_timeout(Some(config.handshake_timeout))
+                .map_err(Into::into),
+        )?;
+        at_stage(
+            "input set write timeout",
+            input
+                .set_write_timeout(Some(config.handshake_timeout))
+                .map_err(Into::into),
+        )?;
 
         let attach_id = next_request_id;
         next_request_id += 1;
-        write_payload(
-            &mut input,
-            attach_id,
-            &InputAttach {
-                session_id,
-                last_seen_input_seq: 0,
-            },
+        at_stage(
+            "input attach write",
+            write_payload(
+                &mut input,
+                attach_id,
+                &InputAttach {
+                    session_id,
+                    last_seen_input_seq: 0,
+                },
+            ),
         )?;
 
-        let attach_ok_frame = input.read_frame()?;
-        let attach_ok = decode_expected::<InputAttachOk>(&attach_ok_frame)?;
+        let attach_ok_frame = at_stage(
+            "input attach ok read",
+            input.read_frame().map_err(GuestError::from),
+        )?;
+        let attach_ok = at_stage(
+            "input attach ok decode",
+            decode_expected::<InputAttachOk>(&attach_ok_frame),
+        )?;
         if attach_ok_frame.header.id != attach_id {
             return Err(GuestError::UnexpectedResponseId {
                 expected: attach_id,
@@ -98,6 +152,31 @@ impl GuestTransportClient {
         if !attach_ok.status.is_ok() {
             return Err(GuestError::NonOkStatus(attach_ok.status));
         }
+
+        at_stage(
+            "control set steady read timeout",
+            control
+                .set_read_timeout(Some(config.io_timeout))
+                .map_err(Into::into),
+        )?;
+        at_stage(
+            "control set steady write timeout",
+            control
+                .set_write_timeout(Some(config.io_timeout))
+                .map_err(Into::into),
+        )?;
+        at_stage(
+            "input set steady read timeout",
+            input
+                .set_read_timeout(Some(config.io_timeout))
+                .map_err(Into::into),
+        )?;
+        at_stage(
+            "input set steady write timeout",
+            input
+                .set_write_timeout(Some(config.io_timeout))
+                .map_err(Into::into),
+        )?;
 
         Ok(GuestSession {
             info: GuestSessionInfo {
@@ -115,6 +194,13 @@ impl GuestTransportClient {
             },
         })
     }
+}
+
+fn at_stage<T>(stage: &'static str, result: Result<T, GuestError>) -> Result<T, GuestError> {
+    result.map_err(|source| GuestError::Stage {
+        stage,
+        source: Box::new(source),
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -363,6 +449,10 @@ fn decode_expected<T: WirePayload>(frame: &Frame) -> Result<T, GuestError> {
 
 #[derive(Debug)]
 pub enum GuestError {
+    Stage {
+        stage: &'static str,
+        source: Box<GuestError>,
+    },
     Transport(TransportError),
     Protocol(ProtocolError),
     UnexpectedMessage {
@@ -384,6 +474,7 @@ pub enum GuestError {
 impl fmt::Display for GuestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Stage { stage, source } => write!(f, "{stage}: {source}"),
             Self::Transport(error) => write!(f, "{error}"),
             Self::Protocol(error) => write!(f, "{error}"),
             Self::UnexpectedMessage { expected, actual } => {
@@ -414,6 +505,9 @@ impl GuestError {
     pub fn is_timeout_or_would_block(&self) -> bool {
         matches!(
             self,
+            Self::Stage { source, .. } if source.is_timeout_or_would_block()
+        ) || matches!(
+            self,
             Self::Transport(TransportError::Io(io_error))
                 if io_error.kind() == std::io::ErrorKind::WouldBlock
                     || io_error.kind() == std::io::ErrorKind::TimedOut
@@ -429,6 +523,7 @@ impl GuestError {
 impl std::error::Error for GuestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Stage { source, .. } => Some(source.as_ref()),
             Self::Transport(error) => Some(error),
             Self::Protocol(error) => Some(error),
             _ => None,
@@ -675,6 +770,55 @@ mod tests {
             assert_eq!(session.identity().serial, "FXB9961303C9C");
         }
 
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn guest_client_uses_handshake_timeout_before_steady_io_timeout() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = listeners.local_addrs().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut control = listeners.accept_control().unwrap();
+            let hello = control.read_frame().unwrap();
+            thread::sleep(Duration::from_millis(75));
+            write_payload(
+                &mut control,
+                hello.header.id,
+                &HelloOk::success(0xAABB_CCDD, 54),
+            )
+            .unwrap();
+            write_payload(&mut control, 0, &identity()).unwrap();
+
+            let mut input = listeners.accept_input().unwrap();
+            let attach = input.read_frame().unwrap();
+            thread::sleep(Duration::from_millis(75));
+            write_payload(
+                &mut input,
+                attach.header.id,
+                &InputAttachOk {
+                    status: StatusCode::Ok,
+                    input_report_len: 54,
+                    first_input_seq: 1,
+                },
+            )
+            .unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        let session = GuestTransportClient::connect(GuestTransportConfig {
+            addrs,
+            connect_timeout: Duration::from_secs(1),
+            handshake_timeout: Duration::from_millis(500),
+            io_timeout: Duration::from_millis(10),
+            guest_pid: 1234,
+            guest_label: "handshake-timeout-test".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(session.identity().serial, "FXB9961303C9C");
         server.join().unwrap();
     }
 }

@@ -16,7 +16,9 @@ pub unsafe extern "system" fn DllMain(
     match reason {
         DLL_PROCESS_ATTACH => {
             DisableThreadLibraryCalls(hinst);
-            let _ = panic::catch_unwind(attach);
+            std::thread::spawn(|| {
+                let _ = panic::catch_unwind(attach);
+            });
         }
         DLL_PROCESS_DETACH => {
             if let Some(runtime) = state::runtime() {
@@ -29,11 +31,23 @@ pub unsafe extern "system" fn DllMain(
 }
 
 fn attach() {
-    let config = RuntimeConfig::from_env();
+    let config = RuntimeConfig::driver_from_env();
     let host_bridge_enabled = config.host_bridge_enabled;
     let host_bridge_required = config.host_bridge_required;
     let trace_reports = config.trace_reports;
-    if !state::init_runtime(config) {
+    let connect_timeout_ms = config.connect_timeout.as_millis();
+    let handshake_timeout_ms = config.handshake_timeout.as_millis();
+    let io_timeout_ms = config.io_timeout.as_millis();
+    let reconnect_interval_ms = config.lazy_reconnect_interval.as_millis();
+    let process = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let bridge_connect_allowed = process.eq_ignore_ascii_case("steam.exe");
+    if !state::init_runtime(config, bridge_connect_allowed) {
         debug_line("[crosspuck] driver runtime already initialized");
         return;
     }
@@ -45,29 +59,22 @@ fn attach() {
     }
 
     debug_line(&format!(
-        "[crosspuck] crosspuck-driver attached host_bridge={} required={} trace={}",
-        host_bridge_enabled, host_bridge_required, trace_reports
+        "[crosspuck] crosspuck-driver attached pid={} process={} host_bridge={} required={} trace={} bridge_connect_allowed={} connect_timeout_ms={} handshake_timeout_ms={} io_timeout_ms={} reconnect_interval_ms={}",
+        std::process::id(),
+        process,
+        host_bridge_enabled,
+        host_bridge_required,
+        trace_reports,
+        bridge_connect_allowed,
+        connect_timeout_ms,
+        handshake_timeout_ms,
+        io_timeout_ms,
+        reconnect_interval_ms
     ));
     if host_bridge_enabled {
-        std::thread::spawn(|| {
-            if let Some(runtime) = state::runtime() {
-                match runtime.connect_bridge() {
-                    Ok(()) => {
-                        let snapshot = runtime.snapshot();
-                        debug_line(&format!(
-                            "[crosspuck] startup bridge connect ok identity={:?} profiles={} open_handles={}",
-                            snapshot.identity_state,
-                            snapshot.advertised_profiles,
-                            snapshot.open_handles
-                        ));
-                    }
-                    Err(error) => {
-                        debug_line(&format!(
-                            "[crosspuck] startup bridge connect failed: {error}"
-                        ));
-                    }
-                }
-            }
-        });
+        debug_line("[crosspuck] startup bridge connect skipped: lazy connect enabled");
+        if bridge_connect_allowed {
+            state::start_bridge_connector("steam startup");
+        }
     }
 }

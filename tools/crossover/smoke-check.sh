@@ -66,13 +66,7 @@ driver_dll="$steam_dir/hid.dll"
 reg_file="$bottle_path/crosspuck-driver-env.reg"
 
 if [[ -z "$log_file" ]]; then
-  windows_user_dir="$(find "$bottle_path/drive_c/users" -mindepth 1 -maxdepth 1 -type d \
-    ! -name Public ! -name Default ! -name 'All Users' -print -quit 2>/dev/null || true)"
-  windows_user="crossover"
-  if [[ -n "$windows_user_dir" ]]; then
-    windows_user="$(basename "$windows_user_dir")"
-  fi
-  log_file="$bottle_path/drive_c/users/$windows_user/Temp/crosspuck-driver.log"
+  log_file="$steam_dir/crosspuck-driver.log"
 fi
 
 failures=0
@@ -103,9 +97,9 @@ check_file "driver log" "$log_file"
 
 check_log "DLL attach" "crosspuck-driver attached"
 check_log "hook install" "hook install ok"
-check_log "host bridge result" "startup bridge connect (ok|failed)"
-check_log "HID discovery or caps" "HidP_GetCaps|SetupDi|CreateFile"
-check_log "input/feature/write trace" "ReadFile|HidD_GetInputReport|HidD_GetFeature|HidD_SetFeature|HidD_SetOutputReport|WriteFile"
+check_log "host bridge/catalog result" "startup bridge connect|lazy bridge connect|catalog available|CreateFile virtual|SDL_hid_enumerate|SetupDiGetClassDevs"
+check_log "HID discovery or caps" "HidP_GetCaps|SetupDi|CreateFile|SDL_hid_enumerate|SDL_hid_open_path"
+check_log "input/feature/write trace" "ReadFile|HidD_GetInputReport|HidD_GetFeature|HidD_SetFeature|HidD_SetOutputReport|WriteFile|SDL_hid_read_timeout|SDL_hid_get_feature_report|SDL_hid_send_feature_report|SDL_hid_write"
 check_log "DeviceIoControl trace" "DeviceIoControl"
 
 if [[ "$failures" -gt 0 ]]; then

@@ -11,7 +11,8 @@ pub use config::RuntimeConfig;
 pub use handles::{VirtualHandleId, VirtualHandleTable};
 pub use identity::{RuntimeIdentity, RuntimeIdentityState};
 pub use profile::{
-    HidCaps, VirtualHidProfile, VirtualHidProfileCatalog, VirtualHidProfileDescriptor,
+    path_may_be_virtual, HidCaps, VirtualHidProfile, VirtualHidProfileCatalog,
+    VirtualHidProfileDescriptor,
 };
 pub use runtime::{GuestDriverError, GuestDriverRuntime, GuestDriverSnapshot};
 pub use trace::TraceLimiter;

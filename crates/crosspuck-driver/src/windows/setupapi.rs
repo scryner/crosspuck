@@ -1,4 +1,5 @@
 use super::hidd::HID_INTERFACE_GUID;
+use super::log::debug_line;
 use super::state;
 use crosspuck_core::guest_driver::{VirtualHidProfile, VirtualHidProfileCatalog};
 use std::ffi::c_void;
@@ -234,6 +235,9 @@ pub unsafe extern "system" fn detoured_setupdi_get_class_devs_w(
         return original.unwrap();
     }
     if is_hid_interface_guid(class_guid) && runtime_catalog().is_some() {
+        debug_line(&format!(
+            "[crosspuck] SetupDiGetClassDevsW synthetic flags=0x{flags:08X}"
+        ));
         SYNTHETIC_DEVICE_INFO_SET
     } else {
         original.unwrap_or(INVALID_HANDLE_VALUE)
@@ -254,6 +258,9 @@ pub unsafe extern "system" fn detoured_setupdi_get_class_devs_a(
         return original.unwrap();
     }
     if is_hid_interface_guid(class_guid) && runtime_catalog().is_some() {
+        debug_line(&format!(
+            "[crosspuck] SetupDiGetClassDevsA synthetic flags=0x{flags:08X}"
+        ));
         SYNTHETIC_DEVICE_INFO_SET
     } else {
         original.unwrap_or(INVALID_HANDLE_VALUE)
@@ -290,6 +297,11 @@ pub unsafe extern "system" fn detoured_setupdi_enum_device_interfaces(
         return 0;
     };
     if write_synthetic_device_interface_data(device_interface_data, interface_class_guid, profile) {
+        debug_line(&format!(
+            "[crosspuck] SetupDiEnumDeviceInterfaces synthetic index={} profile={}",
+            member_index,
+            profile.label()
+        ));
         1
     } else {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -380,6 +392,11 @@ pub unsafe extern "system" fn detoured_setupdi_enum_device_info(
         return 0;
     };
     write_synthetic_device_info_data(device_info_data, profile, "SyntheticEnumDeviceInfo");
+    debug_line(&format!(
+        "[crosspuck] SetupDiEnumDeviceInfo synthetic index={} profile={}",
+        member_index,
+        profile.label()
+    ));
     1
 }
 
@@ -394,6 +411,10 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_registry_property_w(
 ) -> BOOL {
     if let Some(profile) = virtual_profile_for_device_info_data(device_info_data) {
         if let Some(value) = registry_property_value(profile, property) {
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetDeviceRegistryPropertyW virtual profile={} property=0x{property:08X}",
+                profile.label()
+            ));
             return write_registry_w(
                 value,
                 property_reg_data_type,
@@ -430,6 +451,10 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_registry_property_a(
 ) -> BOOL {
     if let Some(profile) = virtual_profile_for_device_info_data(device_info_data) {
         if let Some(value) = registry_property_value(profile, property) {
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetDeviceRegistryPropertyA virtual profile={} property=0x{property:08X}",
+                profile.label()
+            ));
             return write_registry_a(
                 value,
                 property_reg_data_type,
@@ -466,6 +491,10 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_instance_id_w(
         if let Some(value) =
             runtime_catalog().and_then(|catalog| catalog.device_instance_id(profile))
         {
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetDeviceInstanceIdW virtual profile={} value={value:?}",
+                profile.label()
+            ));
             return write_instance_id_w(
                 &value,
                 device_instance_id,
@@ -499,6 +528,10 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_instance_id_a(
         if let Some(value) =
             runtime_catalog().and_then(|catalog| catalog.device_instance_id(profile))
         {
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetDeviceInstanceIdA virtual profile={} value={value:?}",
+                profile.label()
+            ));
             return write_instance_id_a(
                 &value,
                 device_instance_id,
@@ -533,6 +566,11 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_property_w(
 ) -> BOOL {
     if let Some(profile) = virtual_profile_for_device_info_data(device_info_data) {
         if let Some(value) = device_property_value(profile, property_key) {
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetDevicePropertyW virtual profile={} prop_type={}",
+                profile.label(),
+                value.prop_type
+            ));
             return write_device_property_w(
                 value,
                 property_type,
@@ -560,7 +598,7 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_property_w(
 }
 
 fn runtime_catalog() -> Option<VirtualHidProfileCatalog> {
-    state::runtime().and_then(|runtime| runtime.catalog())
+    state::catalog("SetupAPI catalog")
 }
 
 fn synthetic_profile_for_member(
@@ -620,6 +658,10 @@ unsafe fn synthesize_device_interface_detail_w(
         return 0;
     }
     write_detail_w_path(device_interface_detail_data, &path);
+    debug_line(&format!(
+        "[crosspuck] SetupDiGetDeviceInterfaceDetailW synthetic profile={} path={path:?}",
+        profile.label()
+    ));
     1
 }
 
@@ -644,6 +686,10 @@ unsafe fn synthesize_device_interface_detail_a(
         return 0;
     }
     write_detail_a_path(device_interface_detail_data, &path);
+    debug_line(&format!(
+        "[crosspuck] SetupDiGetDeviceInterfaceDetailA synthetic profile={} path={path:?}",
+        profile.label()
+    ));
     1
 }
 
@@ -1001,7 +1047,7 @@ fn virtual_profile_for_devinst(devinst: u32) -> Option<VirtualHidProfile> {
         .find_map(|(stored, profile)| (*stored == devinst).then_some(*profile))
 }
 
-fn remember_virtual_devinst(devinst: u32, profile: VirtualHidProfile, _source: &str) {
+fn remember_virtual_devinst(devinst: u32, profile: VirtualHidProfile, source: &str) {
     let Ok(mut guard) = VIRTUAL_DEVINSTS
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
@@ -1013,6 +1059,10 @@ fn remember_virtual_devinst(devinst: u32, profile: VirtualHidProfile, _source: &
     } else {
         guard.push((devinst, profile));
     }
+    debug_line(&format!(
+        "[crosspuck] SetupAPI remember devinst=0x{devinst:08X} profile={} source={source}",
+        profile.label()
+    ));
 }
 
 fn interface_reserved(profile: VirtualHidProfile) -> usize {

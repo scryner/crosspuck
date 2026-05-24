@@ -552,7 +552,7 @@ mod windows_proxy {
             ));
             let host_bridge_enabled = env_bool("CROSSPUCK_HOST_BRIDGE", false);
             let host_bridge_connect_timeout =
-                Duration::from_millis(env_u64("CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS", 2_000));
+                Duration::from_millis(env_u64("CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS", 5_000));
             let host_bridge_io_timeout =
                 Duration::from_millis(env_u64("CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS", 50));
 

@@ -1,6 +1,7 @@
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
 
@@ -27,8 +28,23 @@ fn append_file_line(message: &str) {
 }
 
 fn open_log_file() -> Option<File> {
-    let path = std::env::var_os("CROSSPUCK_LOG_FILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("crosspuck-driver.log"));
-    OpenOptions::new().create(true).append(true).open(path).ok()
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path())
+        .ok()
+}
+
+fn log_path() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            for ancestor in parent.ancestors() {
+                if ancestor.join("steam.exe").exists() || ancestor.join("Steam.exe").exists() {
+                    return ancestor.join("crosspuck-driver.log");
+                }
+            }
+            return parent.join("crosspuck-driver.log");
+        }
+    }
+    PathBuf::from("crosspuck-driver.log")
 }

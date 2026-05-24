@@ -1,4 +1,4 @@
-use super::{kernel32, setupapi};
+use super::{kernel32, sdl, setupapi};
 use min_hook_rs::{create_hook_api, enable_hook, initialize};
 use std::ffi::c_void;
 
@@ -106,6 +106,7 @@ pub fn install() -> Result<(), String> {
         setupapi::detoured_setupdi_get_device_property_w as *mut c_void,
         setupapi::set_original_setupdi_get_device_property_w,
     )?;
+    install_sdl_hooks();
     Ok(())
 }
 
@@ -121,4 +122,76 @@ fn install_hook(
     enable_hook(target)
         .map_err(|error| format!("enable hook {module}!{proc_name} failed: {error:?}"))?;
     Ok(())
+}
+
+fn install_optional_hook(
+    module: &str,
+    proc_name: &str,
+    detour: *mut c_void,
+    set_original: impl FnOnce(*mut c_void) -> Result<(), String>,
+) {
+    let Ok((trampoline, target)) = create_hook_api(module, proc_name, detour) else {
+        return;
+    };
+    if let Err(error) = set_original(trampoline) {
+        sdl::log_optional_hook_error(module, proc_name, &error);
+        return;
+    }
+    if let Err(error) = enable_hook(target) {
+        sdl::log_optional_hook_error(module, proc_name, &format!("{error:?}"));
+        return;
+    }
+    sdl::log_optional_hook_installed(module, proc_name);
+}
+
+fn install_sdl_hooks() {
+    sdl::load_sdl3();
+    install_optional_hook(
+        "SDL3.dll",
+        "SDL_hid_close",
+        sdl::detoured_sdl_hid_close as *mut c_void,
+        sdl::set_original_sdl_hid_close,
+    );
+    install_optional_hook(
+        "SDL3.dll",
+        "SDL_hid_enumerate",
+        sdl::detoured_sdl_hid_enumerate as *mut c_void,
+        sdl::set_original_sdl_hid_enumerate,
+    );
+    install_optional_hook(
+        "SDL3.dll",
+        "SDL_hid_free_enumeration",
+        sdl::detoured_sdl_hid_free_enumeration as *mut c_void,
+        sdl::set_original_sdl_hid_free_enumeration,
+    );
+    install_optional_hook(
+        "SDL3.dll",
+        "SDL_hid_open_path",
+        sdl::detoured_sdl_hid_open_path as *mut c_void,
+        sdl::set_original_sdl_hid_open_path,
+    );
+    install_optional_hook(
+        "SDL3.dll",
+        "SDL_hid_read_timeout",
+        sdl::detoured_sdl_hid_read_timeout as *mut c_void,
+        sdl::set_original_sdl_hid_read_timeout,
+    );
+    install_optional_hook(
+        "SDL3.dll",
+        "SDL_hid_write",
+        sdl::detoured_sdl_hid_write as *mut c_void,
+        sdl::set_original_sdl_hid_write,
+    );
+    install_optional_hook(
+        "SDL3.dll",
+        "SDL_hid_get_feature_report",
+        sdl::detoured_sdl_hid_get_feature_report as *mut c_void,
+        sdl::set_original_sdl_hid_get_feature_report,
+    );
+    install_optional_hook(
+        "SDL3.dll",
+        "SDL_hid_send_feature_report",
+        sdl::detoured_sdl_hid_send_feature_report as *mut c_void,
+        sdl::set_original_sdl_hid_send_feature_report,
+    );
 }

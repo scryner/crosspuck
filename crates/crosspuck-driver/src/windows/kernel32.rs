@@ -5,7 +5,7 @@ use super::errors::{set_last_error_for, ERROR_DEVICE_NOT_CONNECTED_CODE};
 use super::handles::{handle_for_profile, profile_for_handle, profile_for_open_handle};
 use super::log::debug_line;
 use super::state;
-use crosspuck_core::guest_driver::{VirtualHandleId, VirtualHidProfile};
+use crosspuck_core::guest_driver::{path_may_be_virtual, VirtualHandleId, VirtualHidProfile};
 use std::ffi::c_void;
 use std::slice;
 use std::sync::{Mutex, OnceLock};
@@ -271,15 +271,43 @@ pub unsafe extern "system" fn detoured_device_io_control(
 }
 
 unsafe fn claim_virtual_path(path: &str) -> Option<HANDLE> {
-    let runtime = state::runtime()?;
-    let catalog = runtime.catalog()?;
-    let profile = catalog.profile_for_path(path)?;
+    if !path_may_be_virtual(path) {
+        return None;
+    }
+
+    let Some(runtime) = state::runtime() else {
+        debug_line(&format!(
+            "[crosspuck] CreateFile path={path:?} not claimed: runtime missing"
+        ));
+        return None;
+    };
+    let Some(catalog) = state::catalog_if_connected("CreateFile") else {
+        debug_line(&format!(
+            "[crosspuck] CreateFile path={path:?} not claimed: cached catalog unavailable"
+        ));
+        return None;
+    };
+    let Some(profile) = catalog.profile_for_path(path) else {
+        debug_line(&format!(
+            "[crosspuck] CreateFile path={path:?} not claimed: no virtual profile"
+        ));
+        return None;
+    };
     match runtime.open_profile(profile) {
         Ok(handle_id) => {
             remember_virtual_handle(profile, handle_id);
-            Some(handle_for_profile(profile))
+            let handle = handle_for_profile(profile);
+            debug_line(&format!(
+                "[crosspuck] CreateFile virtual profile={} handle={handle:p} path={path:?}",
+                profile.label()
+            ));
+            Some(handle)
         }
         Err(error) => {
+            debug_line(&format!(
+                "[crosspuck] CreateFile virtual failed profile={} path={path:?} error={error}",
+                profile.label()
+            ));
             set_last_error_for(&error);
             None
         }
@@ -307,6 +335,11 @@ unsafe fn read_virtual_file(
             if !bytes_read.is_null() {
                 *bytes_read = count as u32;
             }
+            debug_line(&format!(
+                "[crosspuck] ReadFile virtual profile={} requested={} returned={count}",
+                profile.label(),
+                bytes_to_read
+            ));
             TRUE_U8
         }
         Ok(None) => {
@@ -320,6 +353,11 @@ unsafe fn read_virtual_file(
             if !bytes_read.is_null() {
                 *bytes_read = 0;
             }
+            debug_line(&format!(
+                "[crosspuck] ReadFile virtual failed profile={} requested={} error={error}",
+                profile.label(),
+                bytes_to_read
+            ));
             set_last_error_for(&error);
             FALSE_U8
         }
@@ -347,12 +385,22 @@ unsafe fn write_virtual_file(
             if !bytes_written.is_null() {
                 *bytes_written = u32::from(count);
             }
+            debug_line(&format!(
+                "[crosspuck] WriteFile virtual profile={} requested={} accepted={count}",
+                profile.label(),
+                bytes_to_write
+            ));
             TRUE_U8
         }
         Err(error) => {
             if !bytes_written.is_null() {
                 *bytes_written = 0;
             }
+            debug_line(&format!(
+                "[crosspuck] WriteFile virtual failed profile={} requested={} error={error}",
+                profile.label(),
+                bytes_to_write
+            ));
             set_last_error_for(&error);
             FALSE_U8
         }
@@ -380,8 +428,17 @@ fn close_virtual_handle(profile: VirtualHidProfile) -> bool {
         .rposition(|(stored_profile, _)| *stored_profile == profile)
     {
         let (_, handle_id) = handles.remove(index);
-        return runtime.close_handle(handle_id).is_ok();
+        let closed = runtime.close_handle(handle_id).is_ok();
+        debug_line(&format!(
+            "[crosspuck] CloseHandle virtual profile={} closed={closed}",
+            profile.label()
+        ));
+        return closed;
     }
+    debug_line(&format!(
+        "[crosspuck] CloseHandle virtual profile={} closed=false",
+        profile.label()
+    ));
     false
 }
 
@@ -428,6 +485,11 @@ unsafe fn trace_virtual_ioctl(
             "[crosspuck] DeviceIoControl code=0x{io_control_code:08X} in={} out={} payload={rendered}",
             payload.len(),
             out_buffer_size
+        ));
+    } else {
+        debug_line(&format!(
+            "[crosspuck] DeviceIoControl code=0x{io_control_code:08X} in={} out={out_buffer_size}",
+            payload.len()
         ));
     }
 }

@@ -15,13 +15,13 @@ With this enabled, virtual `ReadFile`/`HidD_GetFeature`/`HidD_SetFeature`/`HidD_
 ## Build
 
 ```powershell
-cargo build --release --target x86_64-pc-windows-msvc
+cargo build --release --target x86_64-pc-windows-gnu
 ```
 
 The DLL is emitted as:
 
 ```text
-target\x86_64-pc-windows-msvc\release\hid.dll
+target\x86_64-pc-windows-gnu\release\hid.dll
 ```
 
 ## Run
@@ -38,7 +38,7 @@ Optional matching knobs:
 ```powershell
 set CROSSPUCK_CLAIM_PATH_SUBSTR=vid_28de
 set CROSSPUCK_CLAIM_ALL_HID=1
-set CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS=2000
+set CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS=5000
 set CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS=50
 ```
 

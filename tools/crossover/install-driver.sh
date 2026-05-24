@@ -7,15 +7,15 @@ Usage:
   tools/crossover/install-driver.sh [--bottle NAME | --bottle-path PATH] [--driver PATH] [--steam-dir PATH]
 
 Installs the production crosspuck-driver hid.dll next to Steam.exe inside a
-CrossOver bottle and writes a registry file with the environment variables
-needed for smoke testing.
+CrossOver bottle and writes an optional registry file for Wine override and
+trace/log settings.
 
 Options:
   --bottle NAME       CrossOver bottle name. Defaults to Steam when present.
   --bottle-path PATH  Absolute bottle path.
-  --driver PATH       hid.dll path. Defaults to target/x86_64-pc-windows-msvc/release/hid.dll.
+  --driver PATH       hid.dll path. Defaults to target/x86_64-pc-windows-gnu/release/hid.dll.
   --steam-dir PATH    Steam directory inside the bottle. Auto-detected from Steam.exe.
-  --log-file PATH     Unix path for the driver log file. Defaults to the bottle user's Temp dir.
+  --log-file PATH     Unix path for the driver log file. Defaults to the Steam directory.
   --trace 0|1         Set CROSSPUCK_TRACE_REPORTS. Defaults to 1.
   --required 0|1      Set CROSSPUCK_HOST_BRIDGE_REQUIRED. Defaults to 1.
   --help              Show this help.
@@ -30,7 +30,7 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 
 bottle_name=""
 bottle_path=""
-driver_path="$repo_root/target/x86_64-pc-windows-msvc/release/hid.dll"
+driver_path="$repo_root/target/x86_64-pc-windows-gnu/release/hid.dll"
 steam_dir=""
 log_file=""
 trace_reports="1"
@@ -103,8 +103,8 @@ if [[ ! -f "$driver_path" ]]; then
 Driver DLL not found:
   $driver_path
 
-Build it on a Windows/MSVC-capable machine first:
-  cargo build -p crosspuck-driver --release --target x86_64-pc-windows-msvc
+Build it first:
+  cargo build -p crosspuck-driver --release --target x86_64-pc-windows-gnu
 EOF
   exit 1
 fi
@@ -132,28 +132,13 @@ if [[ -f "$target_dll" ]]; then
 fi
 cp -f "$driver_path" "$target_dll"
 
-windows_user_dir="$(find "$bottle_path/drive_c/users" -mindepth 1 -maxdepth 1 -type d \
-  ! -name Public ! -name Default ! -name 'All Users' -print -quit 2>/dev/null || true)"
-windows_user=""
-if [[ -n "$windows_user_dir" ]]; then
-  windows_user="$(basename "$windows_user_dir")"
-fi
-if [[ -z "$windows_user" ]]; then
-  windows_user="crossover"
-fi
-
 if [[ -z "$log_file" ]]; then
-  log_file="$bottle_path/drive_c/users/$windows_user/Temp/crosspuck-driver.log"
+  log_file="$steam_dir/crosspuck-driver.log"
 fi
 mkdir -p "$(dirname "$log_file")"
+find "$steam_dir" -name crosspuck-driver.log -type f ! -path "$log_file" -delete 2>/dev/null || true
+find "$bottle_path/drive_c/users" -name crosspuck-driver.log -type f -delete 2>/dev/null || true
 : > "$log_file"
-
-rel_log="${log_file#"$bottle_path/drive_c/"}"
-if [[ "$rel_log" == "$log_file" ]]; then
-  windows_log='C:\users\crossover\Temp\crosspuck-driver.log'
-else
-  windows_log="C:\\${rel_log//\//\\}"
-fi
 
 reg_file="$bottle_path/crosspuck-driver-env.reg"
 cat > "$reg_file" <<EOF
@@ -165,10 +150,13 @@ Windows Registry Editor Version 5.00
 "CROSSPUCK_TRACE_REPORTS"="$trace_reports"
 "CROSSPUCK_TRACE_REPORT_LIMIT"="2048"
 "CROSSPUCK_TRACE_REPORT_MAX_BYTES"="128"
-"CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS"="2000"
+"CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS"="1000"
+"CROSSPUCK_HOST_BRIDGE_HANDSHAKE_TIMEOUT_MS"="2000"
 "CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS"="50"
 "CROSSPUCK_HOST_BRIDGE_RECONNECT_INTERVAL_MS"="1000"
-"CROSSPUCK_LOG_FILE"="$windows_log"
+
+[HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]
+"hid"="native,builtin"
 EOF
 
 cat <<EOF
@@ -182,7 +170,8 @@ Driver log file:
   $log_file
 
 Next:
-  1. Import the .reg file into the "$bottle_name" bottle with CrossOver's Run Command or regedit.
+  1. Optional but recommended for smoke testing: import the .reg file into the "$bottle_name" bottle with CrossOver's Run Command or regedit.
+     The driver has built-in host bridge defaults, while the .reg file sets trace/log settings and the Wine hid DLL override explicitly.
   2. Start the macOS CrossPuck host app.
   3. Start Steam from the same bottle.
   4. Watch the log:

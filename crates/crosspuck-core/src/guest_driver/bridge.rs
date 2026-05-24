@@ -12,12 +12,14 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const DEFAULT_INPUT_QUEUE_CAPACITY: usize = 64;
+const DEFAULT_GUEST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_GUEST_IO_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug)]
 pub struct HostBridgeConfig {
     pub addrs: TransportAddrs,
     pub connect_timeout: Duration,
+    pub handshake_timeout: Duration,
     pub io_timeout: Duration,
     pub guest_label: String,
     pub input_queue_capacity: usize,
@@ -28,6 +30,7 @@ impl Default for HostBridgeConfig {
         Self {
             addrs: TransportAddrs::default(),
             connect_timeout: Duration::from_secs(2),
+            handshake_timeout: DEFAULT_GUEST_HANDSHAKE_TIMEOUT,
             io_timeout: DEFAULT_GUEST_IO_TIMEOUT,
             guest_label: "crosspuck-driver".to_string(),
             input_queue_capacity: DEFAULT_INPUT_QUEUE_CAPACITY,
@@ -57,6 +60,7 @@ impl HostBridge {
         let session = GuestTransportClient::connect(GuestTransportConfig {
             addrs: config.addrs,
             connect_timeout: config.connect_timeout,
+            handshake_timeout: config.handshake_timeout,
             io_timeout: config.io_timeout,
             guest_label: config.guest_label,
             ..GuestTransportConfig::default()

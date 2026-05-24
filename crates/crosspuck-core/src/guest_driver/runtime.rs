@@ -76,7 +76,11 @@ impl GuestDriverRuntime {
     }
 
     pub fn catalog(&self) -> Option<VirtualHidProfileCatalog> {
-        if self.config.host_bridge_required && !self.ensure_connected() {
+        self.catalog_result().ok().flatten()
+    }
+
+    pub fn catalog_if_connected(&self) -> Option<VirtualHidProfileCatalog> {
+        if self.config.host_bridge_required && !self.bridge_healthy() {
             return None;
         }
         if !self
@@ -89,6 +93,23 @@ impl GuestDriverRuntime {
         self.catalog.lock().ok().and_then(|catalog| catalog.clone())
     }
 
+    pub fn catalog_result(&self) -> Result<Option<VirtualHidProfileCatalog>, GuestDriverError> {
+        if self.config.host_bridge_required && !self.ensure_connected_result()? {
+            return Ok(None);
+        }
+        if !self
+            .identity
+            .lock()
+            .is_ok_and(|identity| identity.can_advertise(self.config.host_bridge_required))
+        {
+            return Ok(None);
+        }
+        self.catalog
+            .lock()
+            .map(|catalog| catalog.clone())
+            .map_err(|_| GuestDriverError::StatePoisoned("catalog"))
+    }
+
     pub fn can_advertise(&self) -> bool {
         if self.config.host_bridge_required && !self.ensure_connected() {
             return false;
@@ -99,24 +120,24 @@ impl GuestDriverRuntime {
     }
 
     pub fn ensure_connected(&self) -> bool {
+        self.ensure_connected_result().unwrap_or(false)
+    }
+
+    pub fn ensure_connected_result(&self) -> Result<bool, GuestDriverError> {
         if !self.config.host_bridge_enabled {
-            return false;
+            return Ok(false);
         }
 
-        if self.bridge.lock().is_ok_and(|bridge| {
-            bridge
-                .as_ref()
-                .is_some_and(|bridge| bridge.input_stats().read_errors == 0)
-        }) {
-            return true;
+        if self.bridge_healthy() {
+            return Ok(true);
         }
         self.clear_bridge("stale or missing bridge");
 
         if !self.should_attempt_connect() {
-            return false;
+            return Ok(false);
         }
 
-        self.connect_bridge().is_ok()
+        self.connect_bridge().map(|()| true)
     }
 
     pub fn connect_bridge(&self) -> Result<(), GuestDriverError> {
@@ -349,6 +370,14 @@ impl GuestDriverRuntime {
 
     fn command_timeout_ms(&self) -> u16 {
         self.config.io_timeout.as_millis().min(u128::from(u16::MAX)) as u16
+    }
+
+    fn bridge_healthy(&self) -> bool {
+        self.bridge.lock().is_ok_and(|bridge| {
+            bridge
+                .as_ref()
+                .is_some_and(|bridge| bridge.input_stats().read_errors == 0)
+        })
     }
 }
 

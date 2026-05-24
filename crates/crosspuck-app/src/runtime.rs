@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+const INPUT_ATTACH_TIMEOUT: Duration = Duration::from_secs(3);
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HostRuntimeState {
     Starting,
@@ -321,6 +323,26 @@ fn handle_session_with_backend(
     backend: Arc<dyn HostBackend>,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), RuntimeError> {
+    handle_session_with_backend_timeout(
+        listeners,
+        control,
+        session,
+        app_state,
+        backend,
+        stop,
+        INPUT_ATTACH_TIMEOUT,
+    )
+}
+
+fn handle_session_with_backend_timeout(
+    listeners: &TransportListeners,
+    control: &mut ChannelStream,
+    session: SessionStart,
+    app_state: &AppState,
+    backend: Arc<dyn HostBackend>,
+    stop: &Arc<AtomicBool>,
+    input_attach_timeout: Duration,
+) -> Result<(), RuntimeError> {
     let identity = backend.identity().clone();
     app_state.set(HostRuntimeState::PuckConnected {
         serial: identity.serial.clone(),
@@ -333,7 +355,7 @@ fn handle_session_with_backend(
     )?;
     write_payload(control, 0, &identity)?;
 
-    let mut input = accept_input_for_session(listeners, stop)?;
+    let mut input = accept_input_for_session(listeners, stop, input_attach_timeout)?;
     input.set_write_timeout(Some(Duration::from_millis(250)))?;
     input.set_read_timeout(Some(Duration::from_millis(250)))?;
     let attach_frame = input.read_frame()?;
@@ -455,7 +477,9 @@ fn run_control_loop(
 fn accept_input_for_session(
     listeners: &TransportListeners,
     stop: &Arc<AtomicBool>,
+    timeout: Duration,
 ) -> Result<ChannelStream, RuntimeError> {
+    let deadline = Instant::now() + timeout;
     loop {
         if stop.load(Ordering::Relaxed) {
             return Err(RuntimeError::Stopping);
@@ -463,7 +487,11 @@ fn accept_input_for_session(
         match listeners.accept_input() {
             Ok(input) => return Ok(input),
             Err(error) if is_would_block(&error) => {
-                sleep_until_stop(stop, Duration::from_millis(50));
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(RuntimeError::InputAttachTimeout(timeout));
+                }
+                sleep_until_stop(stop, remaining.min(Duration::from_millis(50)));
             }
             Err(error) => return Err(error.into()),
         }
@@ -585,6 +613,7 @@ enum RuntimeError {
     ProtocolVersionMismatch(u16),
     DeviceUnavailable(String),
     Stopping,
+    InputAttachTimeout(Duration),
     SessionMismatch {
         expected: u32,
         actual: u32,
@@ -611,6 +640,9 @@ impl std::fmt::Display for RuntimeError {
             }
             Self::DeviceUnavailable(error) => write!(f, "device unavailable: {error}"),
             Self::Stopping => write!(f, "stopping"),
+            Self::InputAttachTimeout(timeout) => {
+                write!(f, "input attach timed out after {}ms", timeout.as_millis())
+            }
             Self::SessionMismatch { expected, actual } => {
                 write!(
                     f,
@@ -623,7 +655,8 @@ impl std::fmt::Display for RuntimeError {
 
 impl RuntimeError {
     fn is_timeout(&self) -> bool {
-        matches!(self, Self::Transport(error) if is_timeout_or_would_block(error))
+        matches!(self, Self::InputAttachTimeout(_))
+            || matches!(self, Self::Transport(error) if is_timeout_or_would_block(error))
     }
 }
 
@@ -942,6 +975,56 @@ mod tests {
         let mut input = ChannelStream::connect(Channel::Input, addrs.input).unwrap();
         write_payload(&mut input, 2, &Hello::new(1234)).unwrap();
         drop(input);
+        drop(control);
+
+        assert!(result_rx.recv().unwrap());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn host_session_times_out_missing_input_attach() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = listeners.local_addrs().unwrap();
+        let backend = FakeBackend::new(Vec::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut control = listeners.accept_control().unwrap();
+            let hello = control.read_frame().unwrap();
+            listeners.set_nonblocking(true).unwrap();
+            let result = handle_session_with_backend_timeout(
+                &listeners,
+                &mut control,
+                SessionStart {
+                    session_id: 1,
+                    hello_request_id: hello.header.id,
+                    guest_pid: 1234,
+                },
+                &AppState::new(),
+                Arc::new(backend),
+                &server_stop,
+                Duration::from_millis(100),
+            );
+            result_tx
+                .send(matches!(result, Err(RuntimeError::InputAttachTimeout(_))))
+                .unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+        let mut control = ChannelStream::connect(Channel::Control, addrs.control).unwrap();
+        write_payload(&mut control, 1, &Hello::new(1234)).unwrap();
+        assert_eq!(
+            control.read_frame().unwrap().header.message_type,
+            MessageType::HelloOk
+        );
+        assert_eq!(
+            control.read_frame().unwrap().header.message_type,
+            MessageType::Identity
+        );
         drop(control);
 
         assert!(result_rx.recv().unwrap());

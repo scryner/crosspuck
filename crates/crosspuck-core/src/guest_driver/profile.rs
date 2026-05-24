@@ -190,11 +190,12 @@ impl VirtualHidProfileCatalog {
 
     pub fn profile_for_path(&self, path: &str) -> Option<VirtualHidProfile> {
         let lower = path.to_ascii_lowercase();
-        self.descriptors.iter().find_map(|descriptor| {
-            let mi = format!("mi_{:02x}", descriptor.interface_number);
-            let col = format!("col{:02x}", descriptor.collection_number);
-            (lower.contains(&mi) && lower.contains(&col)).then_some(descriptor.profile)
-        })
+        self.profile_for_exact_path(&lower)
+            .or_else(|| self.profile_for_poc_compatible_path(&lower))
+    }
+
+    pub fn path_may_be_virtual(path: &str) -> bool {
+        path_may_be_virtual(path)
     }
 
     pub fn device_path(&self, profile: VirtualHidProfile) -> Option<String> {
@@ -279,6 +280,61 @@ impl VirtualHidProfileCatalog {
             descriptor.instance_suffix
         )
     }
+
+    fn profile_for_exact_path(&self, lower_path: &str) -> Option<VirtualHidProfile> {
+        self.descriptors.iter().find_map(|descriptor| {
+            let vid = format!("vid_{:04x}", self.identity.vendor_id);
+            let pid = format!("pid_{:04x}", self.identity.product_id);
+            let mi = format!("mi_{:02x}", descriptor.interface_number);
+            let col = format!("col{:02x}", descriptor.collection_number);
+            let usage = format!(
+                "up:{:04x}_u:{:04x}",
+                descriptor.usage_page, descriptor.usage
+            );
+            let hid_usage = format!("hid_device_{usage}");
+
+            let identity_match = lower_path.contains(&vid) && lower_path.contains(&pid);
+            let interface_match = identity_match && lower_path.contains(&mi);
+            let collection_match = identity_match
+                && lower_path.contains(&col)
+                && descriptor.profile == VirtualHidProfile::VendorDongle;
+            let usage_match = lower_path.contains(&usage) || lower_path.contains(&hid_usage);
+
+            (interface_match || collection_match || usage_match).then_some(descriptor.profile)
+        })
+    }
+
+    fn profile_for_poc_compatible_path(&self, lower_path: &str) -> Option<VirtualHidProfile> {
+        let profile = if lower_path.contains("vid_845e&pid_0002")
+            || lower_path.contains("vid_28de&pid_1304&mi_06")
+            || (lower_path.contains("vid_28de&pid_1304") && lower_path.contains("col02"))
+        {
+            VirtualHidProfile::VendorDongle
+        } else if lower_path.contains("vid_28de&pid_1304&mi_03") {
+            VirtualHidProfile::Interface3
+        } else if lower_path.contains("vid_28de&pid_1304&mi_04") {
+            VirtualHidProfile::Interface4
+        } else if lower_path.contains("vid_28de&pid_1304&mi_05") {
+            VirtualHidProfile::Interface5
+        } else if lower_path.contains("vid_845e&pid_0001")
+            || lower_path.contains("vid_28de&pid_1304&mi_02")
+            || lower_path.contains("vid_28de&pid_1304")
+        {
+            VirtualHidProfile::Main
+        } else {
+            return None;
+        };
+
+        self.descriptor(profile)
+            .map(|descriptor| descriptor.profile)
+    }
+}
+
+pub fn path_may_be_virtual(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("vid_845e&pid_0001")
+        || lower.contains("vid_845e&pid_0002")
+        || (lower.contains("vid_28de") && lower.contains("pid_1304"))
 }
 
 #[cfg(test)]
@@ -330,5 +386,64 @@ mod tests {
         assert!(catalog
             .descriptor(VirtualHidProfile::VendorDongle)
             .is_some());
+    }
+
+    #[test]
+    fn matches_paths_without_collection_number() {
+        let identity = default_fallback_identity();
+        let catalog = VirtualHidProfileCatalog::from_identity(&identity, false);
+
+        assert_eq!(
+            catalog.profile_for_path(r"\\?\hid#vid_28de&pid_1304&mi_06#serial"),
+            Some(VirtualHidProfile::VendorDongle)
+        );
+        assert_eq!(
+            catalog.profile_for_path(r"\\?\hid#vid_28de&pid_1304&mi_03#serial"),
+            Some(VirtualHidProfile::Interface3)
+        );
+        assert_eq!(
+            catalog.profile_for_path(r"\\?\hid#vid_28de&pid_1304#serial"),
+            Some(VirtualHidProfile::Main)
+        );
+    }
+
+    #[test]
+    fn matches_default_wine_hid_paths() {
+        let identity = default_fallback_identity();
+        let catalog = VirtualHidProfileCatalog::from_identity(&identity, false);
+
+        assert_eq!(
+            catalog.profile_for_path(r"\\?\hid#vid_845e&pid_0001#serial"),
+            Some(VirtualHidProfile::Main)
+        );
+        assert_eq!(
+            catalog.profile_for_path(r"\\?\hid#vid_845e&pid_0002#serial"),
+            Some(VirtualHidProfile::VendorDongle)
+        );
+    }
+
+    #[test]
+    fn prefilter_only_accepts_crosspuck_candidates() {
+        assert!(path_may_be_virtual(r"\\?\hid#vid_845e&pid_0001#serial"));
+        assert!(path_may_be_virtual(r"\\?\hid#vid_845e&pid_0002#serial"));
+        assert!(path_may_be_virtual(
+            r"\\?\hid#vid_28de&pid_1304&mi_02#serial"
+        ));
+        assert!(!path_may_be_virtual(r"\\?\hid#vid_046d&pid_c52b#serial"));
+        assert!(!path_may_be_virtual(r"\\.\pipe\steam"));
+    }
+
+    #[test]
+    fn lenient_path_does_not_resurrect_missing_profiles() {
+        let mut identity = default_fallback_identity();
+        identity
+            .collections
+            .retain(|collection| collection.role == CollectionRole::PuckMain);
+        let catalog = VirtualHidProfileCatalog::from_identity(&identity, false);
+
+        assert_eq!(
+            catalog.profile_for_path(r"\\?\hid#vid_28de&pid_1304&mi_06#serial"),
+            None
+        );
     }
 }

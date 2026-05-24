@@ -1,4 +1,5 @@
 use super::handles::profile_for_preparsed;
+use super::log::debug_line;
 use super::real_hid;
 use super::state;
 use std::ffi::c_void;
@@ -31,13 +32,16 @@ pub unsafe extern "system" fn HidP_GetCaps(
     caps: *mut HidpCaps,
 ) -> i32 {
     let Some(profile) = profile_for_preparsed(preparsed_data) else {
+        debug_line(&format!(
+            "[crosspuck] HidP_GetCaps passthrough preparsed={preparsed_data:p}"
+        ));
         return call_real_hidp_get_caps(preparsed_data, caps);
     };
     if caps.is_null() {
         return -1;
     }
 
-    let Some(catalog) = state::runtime().and_then(|runtime| runtime.catalog()) else {
+    let Some(catalog) = state::catalog("HidP_GetCaps") else {
         return -1;
     };
     let Some(descriptor) = catalog.descriptor(profile) else {
@@ -63,6 +67,15 @@ pub unsafe extern "system" fn HidP_GetCaps(
         number_feature_value_caps: core_caps.number_feature_value_caps,
         number_feature_data_indices: core_caps.number_feature_value_caps,
     };
+    debug_line(&format!(
+        "[crosspuck] HidP_GetCaps virtual profile={} usage_page=0x{:04X} usage=0x{:04X} in={} out={} feature={}",
+        profile.label(),
+        core_caps.usage_page,
+        core_caps.usage,
+        core_caps.input_report_byte_length,
+        core_caps.output_report_byte_length,
+        core_caps.feature_report_byte_length
+    ));
     HIDP_STATUS_SUCCESS
 }
 

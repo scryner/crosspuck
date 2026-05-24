@@ -7,14 +7,20 @@ This crate owns the Windows DLL boundary: `DllMain`, hook installation, Win32 AB
 Build the target DLL with:
 
 ```sh
-cargo build -p crosspuck-driver --release --target x86_64-pc-windows-msvc
+cargo build -p crosspuck-driver --release --target x86_64-pc-windows-gnu
 ```
 
 The output DLL path is:
 
 ```text
-target/x86_64-pc-windows-msvc/release/hid.dll
+target/x86_64-pc-windows-gnu/release/hid.dll
 ```
 
-CrossOver smoke-test procedure and helper scripts are documented in
-[`docs/crossover-smoke.md`](docs/crossover-smoke.md).
+`x86_64-pc-windows-msvc` is also supported for type checking and Windows-native
+builds, but it requires MSVC `link.exe`. On macOS/CrossOver development
+machines, the GNU target is the practical local release build target.
+
+CrossOver smoke-test procedure and helper scripts are documented in:
+
+- [`docs/crossover-smoke.md`](docs/crossover-smoke.md)
+- [`docs/crossover-smoke-ko.md`](docs/crossover-smoke-ko.md)
