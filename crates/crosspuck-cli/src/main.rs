@@ -1,3 +1,5 @@
+mod guest_driver;
+
 use crosspuck_core::hid::{
     build_puck_snapshot, collect_candidates as collect_core_candidates, HidFilter,
 };
@@ -72,6 +74,7 @@ impl Default for Config {
 #[derive(Debug)]
 enum CliError {
     Message(String),
+    GuestDriver(guest_driver::GuestDriverError),
     Hid(HidError),
     Io(std::io::Error),
     Json(serde_json::Error),
@@ -81,10 +84,17 @@ impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CliError::Message(message) => write!(f, "{message}"),
+            CliError::GuestDriver(error) => write!(f, "{error}"),
             CliError::Hid(error) => write!(f, "{error}"),
             CliError::Io(error) => write!(f, "{error}"),
             CliError::Json(error) => write!(f, "{error}"),
         }
+    }
+}
+
+impl From<guest_driver::GuestDriverError> for CliError {
+    fn from(value: guest_driver::GuestDriverError) -> Self {
+        CliError::GuestDriver(value)
     }
 }
 
@@ -119,7 +129,16 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    let config = parse_args(env::args().skip(1))?;
+    let mut args = env::args().skip(1).collect::<Vec<_>>();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("guest-driver" | "mock-guest")
+    ) {
+        args.remove(0);
+        return guest_driver::run(args).map_err(Into::into);
+    }
+
+    let config = parse_args(args.into_iter())?;
 
     if let Some(path) = &config.verify_path {
         return verify_capture_file(path, &config);
@@ -269,9 +288,11 @@ fn print_help() {
         r#"crosspuck-host
 
 macOS 호스트에서 Steam Controller 계열 Valve HID 장치를 열고 Raw HID 패킷을 Hex로 출력합니다.
+또는 `guest-driver` 서브커맨드로 host app에 연결하는 로컬 guest smoke client를 실행합니다.
 
 Usage:
   cargo run -- [options]
+  cargo run -p crosspuck-cli -- guest-driver [options]
 
 Options:
   --list                 장치 목록만 출력하고 종료
@@ -296,6 +317,7 @@ Options:
                          scenario별 출력할 host->device event 최대 개수 (기본값: 40)
   --min-packets <n>      verify 시 필요한 최소 packet 수 (기본값: 1)
   --quiet                캡처 중 packet별 콘솔 출력을 생략
+  guest-driver           host app transport에 연결하는 local mock guest 실행
   -h, --help             도움말 출력
 
 Examples:
@@ -309,6 +331,8 @@ Examples:
   cargo run -- --verify captures/manual.jsonl --min-packets 20
   cargo run -- --analyze-hid-probe captures/native_feedback_20260523-120000.jsonl
   cargo run -- --interface 1 --timeout-ms 250
+  cargo run -p crosspuck-cli -- guest-driver --get-feature 2 0x02 64
+  cargo run -p crosspuck-cli -- guest-driver --reports 1 --allow-input-timeout
 "#
     );
 }
@@ -718,7 +742,7 @@ fn read_packets(device: &HidDevice, target: &DeviceCandidate, config: &Config) -
             _ => {
                 timeout_ticks += 1;
                 total_timeouts += 1;
-                if !config.quiet && (timeout_ticks == 1 || timeout_ticks % 10 == 0) {
+                if !config.quiet && (timeout_ticks == 1 || timeout_ticks.is_multiple_of(10)) {
                     println!(
                         "[{:>8.3}s] 대기 중... 패킷 없음 ({}ms timeout)",
                         elapsed_seconds(started_at.elapsed()),
