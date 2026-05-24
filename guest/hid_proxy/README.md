@@ -10,7 +10,7 @@ When the macOS host app is running, the proxy can use the real host transport in
 set CROSSPUCK_HOST_BRIDGE=1
 ```
 
-With this enabled, virtual `ReadFile`/`HidD_GetFeature`/`HidD_SetFeature`/`HidD_SetOutputReport`/`SDL_hid_*` paths first call the shared `crosspuck-core` guest transport runtime. If the bridge is not connected, the existing replay/synthetic fallback path remains available.
+With this enabled, virtual `ReadFile`/`HidD_GetFeature`/`HidD_SetFeature`/`HidD_SetOutputReport`/`SDL_hid_*` paths first call the shared `crosspuck-core` guest transport runtime. If the bridge is not connected, the proxy retries lazily while keeping the existing replay/synthetic fallback path available. When connected, HID attributes and SDL enumeration use the host-provided identity.
 
 ## Build
 

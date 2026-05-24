@@ -314,6 +314,15 @@ impl fmt::Display for HostBridgeError {
     }
 }
 
+impl HostBridgeError {
+    pub fn should_disconnect_bridge(&self) -> bool {
+        matches!(
+            self,
+            Self::Guest(_) | Self::ControlPoisoned | Self::QueuePoisoned
+        )
+    }
+}
+
 impl std::error::Error for HostBridgeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

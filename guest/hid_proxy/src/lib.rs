@@ -3,7 +3,7 @@ pub mod replay;
 
 #[cfg(windows)]
 mod windows_proxy {
-    use crate::host_bridge::{HostBridge, HostBridgeConfig};
+    use crate::host_bridge::{HostBridge, HostBridgeConfig, HostBridgeError};
     use crate::replay::{ReplayPlayer, ReplayScript};
     use min_hook_rs::{create_hook_api, enable_hook, initialize};
     use std::cell::Cell;
@@ -295,7 +295,8 @@ mod windows_proxy {
     static SDL_AUGMENTED_ENUMERATIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
     static SDL_FEATURE_COMMANDS: OnceLock<Mutex<Vec<SdlFeatureCommand>>> = OnceLock::new();
     static PENDING_INPUT_REPORTS: OnceLock<Mutex<VecDeque<PendingInputReport>>> = OnceLock::new();
-    static HOST_BRIDGE: OnceLock<HostBridge> = OnceLock::new();
+    static HOST_BRIDGE: OnceLock<Mutex<Option<HostBridge>>> = OnceLock::new();
+    static HOST_BRIDGE_LAST_CONNECT_ATTEMPT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
     static CREATE_FILE_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GET_PROC_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
     static VIRTUAL_IO_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -850,6 +851,10 @@ mod windows_proxy {
             return;
         }
 
+        let _ = try_connect_host_bridge(config, "startup");
+    }
+
+    fn try_connect_host_bridge(config: &RuntimeConfig, reason: &str) -> bool {
         match HostBridge::connect(HostBridgeConfig {
             connect_timeout: config.host_bridge_connect_timeout,
             io_timeout: config.host_bridge_io_timeout,
@@ -858,19 +863,27 @@ mod windows_proxy {
             Ok(bridge) => {
                 let identity = &bridge.info().identity;
                 debug_line(&format!(
-                    "[crosspuck] host bridge connected session={} vid=0x{:04X} pid=0x{:04X} serial={:?} product={:?}",
+                    "[crosspuck] host bridge connected reason={reason} session={} vid=0x{:04X} pid=0x{:04X} serial={:?} product={:?}",
                     bridge.info().session_id,
                     identity.vendor_id,
                     identity.product_id,
                     identity.serial,
                     identity.product
                 ));
-                if HOST_BRIDGE.set(bridge).is_err() {
-                    debug_line("[crosspuck] host bridge already initialized");
+                let store = HOST_BRIDGE.get_or_init(|| Mutex::new(None));
+                if let Ok(mut guard) = store.lock() {
+                    *guard = Some(bridge);
+                    true
+                } else {
+                    debug_line("[crosspuck] host bridge lock poisoned during connect");
+                    false
                 }
             }
             Err(error) => {
-                debug_line(&format!("[crosspuck] host bridge connect failed: {error}"));
+                debug_line(&format!(
+                    "[crosspuck] host bridge connect failed reason={reason}: {error}"
+                ));
+                false
             }
         }
     }
@@ -2665,15 +2678,18 @@ mod windows_proxy {
             return FALSE_U8;
         }
 
+        let vendor_id = runtime_vendor_id();
+        let product_id = runtime_product_id();
+        let version_number = runtime_version_number();
         *attributes = HiddAttributes {
             size: std::mem::size_of::<HiddAttributes>() as u32,
-            vendor_id: VIRTUAL_VENDOR_ID,
-            product_id: VIRTUAL_PRODUCT_ID,
-            version_number: VIRTUAL_VERSION_NUMBER,
+            vendor_id,
+            product_id,
+            version_number,
         };
         debug_line(&format!(
             "[crosspuck] HidD_GetAttributes -> vid=0x{:04X} pid=0x{:04X} version=0x{:04X}",
-            VIRTUAL_VENDOR_ID, VIRTUAL_PRODUCT_ID, VIRTUAL_VERSION_NUMBER
+            vendor_id, product_id, version_number
         ));
         TRUE_U8
     }
@@ -2724,10 +2740,11 @@ mod windows_proxy {
             buffer_len
         ));
         if is_virtual_handle(device) {
+            let value = runtime_manufacturer();
             debug_line(&format!(
-                "[crosspuck] HidD_GetManufacturerString -> {VIRTUAL_MANUFACTURER:?}"
+                "[crosspuck] HidD_GetManufacturerString -> {value:?}"
             ));
-            return write_wide_string(buffer, buffer_len, VIRTUAL_MANUFACTURER);
+            return write_wide_string(buffer, buffer_len, &value);
         }
         call_real_hidd_string("HidD_GetManufacturerString", device, buffer, buffer_len)
     }
@@ -2744,10 +2761,9 @@ mod windows_proxy {
             buffer_len
         ));
         if is_virtual_handle(device) {
-            debug_line(&format!(
-                "[crosspuck] HidD_GetProductString -> {VIRTUAL_PRODUCT:?}"
-            ));
-            return write_wide_string(buffer, buffer_len, VIRTUAL_PRODUCT);
+            let value = runtime_product();
+            debug_line(&format!("[crosspuck] HidD_GetProductString -> {value:?}"));
+            return write_wide_string(buffer, buffer_len, &value);
         }
         call_real_hidd_string("HidD_GetProductString", device, buffer, buffer_len)
     }
@@ -2764,10 +2780,11 @@ mod windows_proxy {
             buffer_len
         ));
         if is_virtual_handle(device) {
+            let value = runtime_serial();
             debug_line(&format!(
-                "[crosspuck] HidD_GetSerialNumberString -> {VIRTUAL_SERIAL:?}"
+                "[crosspuck] HidD_GetSerialNumberString -> {value:?}"
             ));
-            return write_wide_string(buffer, buffer_len, VIRTUAL_SERIAL);
+            return write_wide_string(buffer, buffer_len, &value);
         }
         call_real_hidd_string("HidD_GetSerialNumberString", device, buffer, buffer_len)
     }
@@ -2787,13 +2804,13 @@ mod windows_proxy {
         ));
         if is_virtual_handle(device) {
             let value = match string_index {
-                1 => VIRTUAL_MANUFACTURER,
-                2 => VIRTUAL_PRODUCT,
-                3 => VIRTUAL_SERIAL,
-                _ => VIRTUAL_PRODUCT,
+                1 => runtime_manufacturer(),
+                2 => runtime_product(),
+                3 => runtime_serial(),
+                _ => runtime_product(),
             };
             debug_line(&format!("[crosspuck] HidD_GetIndexedString -> {value:?}"));
-            return write_wide_string(buffer, buffer_len, value);
+            return write_wide_string(buffer, buffer_len, &value);
         }
         call_real_hidd_indexed_string(device, string_index, buffer, buffer_len)
     }
@@ -3191,14 +3208,15 @@ mod windows_proxy {
         bytes_to_read: u32,
         bytes_read: *mut u32,
     ) -> Option<BOOL> {
-        let bridge = host_bridge()?;
         if buffer.is_null() {
             return Some(FALSE);
         }
 
         let output =
             unsafe { slice::from_raw_parts_mut(buffer as *mut u8, bytes_to_read as usize) };
-        match bridge.copy_next_input_report(profile.interface_number(), output) {
+        match with_host_bridge_result("INPUT", |bridge| {
+            bridge.copy_next_input_report(profile.interface_number(), output)
+        })? {
             Ok(Some(count)) => {
                 if !bytes_read.is_null() {
                     unsafe {
@@ -3235,14 +3253,15 @@ mod windows_proxy {
         buffer: *mut c_void,
         bytes_to_read: u32,
     ) -> Option<Result<Option<usize>, ()>> {
-        let bridge = host_bridge()?;
         if buffer.is_null() {
             return Some(Err(()));
         }
 
         let output =
             unsafe { slice::from_raw_parts_mut(buffer as *mut u8, bytes_to_read as usize) };
-        match bridge.copy_next_input_report(profile.interface_number(), output) {
+        match with_host_bridge_result("INPUT_READY", |bridge| {
+            bridge.copy_next_input_report(profile.interface_number(), output)
+        })? {
             Ok(Some(count)) => {
                 debug_line(&format!(
                     "[crosspuck] host bridge input ready profile={} requested={} returned={} head={}",
@@ -3595,15 +3614,85 @@ mod windows_proxy {
         VIRTUAL_STREAM_CONNECTED.load(Ordering::Relaxed)
     }
 
-    fn host_bridge() -> Option<&'static HostBridge> {
-        if CONFIG
-            .get()
-            .is_some_and(|config| config.host_bridge_enabled)
-        {
-            HOST_BRIDGE.get()
-        } else {
-            None
+    fn ensure_host_bridge_connected() -> bool {
+        let Some(config) = CONFIG.get() else {
+            return false;
+        };
+        if !config.host_bridge_enabled {
+            return false;
         }
+
+        let store = HOST_BRIDGE.get_or_init(|| Mutex::new(None));
+        let bridge_state = store.lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|bridge| bridge.input_stats().read_errors)
+        });
+        if let Some(0) = bridge_state {
+            return true;
+        }
+        if bridge_state.is_some() {
+            clear_host_bridge("input pump error");
+        }
+
+        if !should_attempt_host_bridge_connect() {
+            return false;
+        }
+
+        try_connect_host_bridge(config, "lazy")
+    }
+
+    fn should_attempt_host_bridge_connect() -> bool {
+        let now = Instant::now();
+        let attempts = HOST_BRIDGE_LAST_CONNECT_ATTEMPT.get_or_init(|| Mutex::new(None));
+        let Ok(mut last_attempt) = attempts.lock() else {
+            return false;
+        };
+        if last_attempt.is_some_and(|last| now.duration_since(last) < Duration::from_secs(1)) {
+            return false;
+        }
+        *last_attempt = Some(now);
+        true
+    }
+
+    fn clear_host_bridge(reason: &str) {
+        let store = HOST_BRIDGE.get_or_init(|| Mutex::new(None));
+        if let Ok(mut guard) = store.lock() {
+            if guard.take().is_some() {
+                debug_line(&format!(
+                    "[crosspuck] host bridge disconnected reason={reason}"
+                ));
+            }
+        }
+    }
+
+    fn with_host_bridge<T>(operation: impl FnOnce(&HostBridge) -> T) -> Option<T> {
+        if !ensure_host_bridge_connected() {
+            return None;
+        }
+        let store = HOST_BRIDGE.get_or_init(|| Mutex::new(None));
+        let guard = store.lock().ok()?;
+        guard.as_ref().map(operation)
+    }
+
+    fn with_existing_host_bridge<T>(operation: impl FnOnce(&HostBridge) -> T) -> Option<T> {
+        let store = HOST_BRIDGE.get()?;
+        let guard = store.lock().ok()?;
+        guard.as_ref().map(operation)
+    }
+
+    fn with_host_bridge_result<T>(
+        operation: &'static str,
+        call: impl FnOnce(&HostBridge) -> Result<T, HostBridgeError>,
+    ) -> Option<Result<T, String>> {
+        let result = with_host_bridge(call)?;
+        if result
+            .as_ref()
+            .is_err_and(HostBridgeError::should_disconnect_bridge)
+        {
+            clear_host_bridge(operation);
+        }
+        Some(result.map_err(|error| error.to_string()))
     }
 
     fn host_bridge_command_timeout_ms() -> u16 {
@@ -3618,28 +3707,55 @@ mod windows_proxy {
             .unwrap_or(2_000)
     }
 
+    fn runtime_vendor_id() -> u16 {
+        with_existing_host_bridge(|bridge| bridge.info().identity.vendor_id)
+            .unwrap_or(VIRTUAL_VENDOR_ID)
+    }
+
+    fn runtime_product_id() -> u16 {
+        with_existing_host_bridge(|bridge| bridge.info().identity.product_id)
+            .unwrap_or(VIRTUAL_PRODUCT_ID)
+    }
+
+    fn runtime_version_number() -> u16 {
+        with_existing_host_bridge(|bridge| bridge.info().identity.version_number)
+            .unwrap_or(VIRTUAL_VERSION_NUMBER)
+    }
+
+    fn runtime_manufacturer() -> String {
+        with_existing_host_bridge(|bridge| bridge.info().identity.manufacturer.clone())
+            .unwrap_or_else(|| VIRTUAL_MANUFACTURER.to_string())
+    }
+
+    fn runtime_product() -> String {
+        with_existing_host_bridge(|bridge| bridge.info().identity.product.clone())
+            .unwrap_or_else(|| VIRTUAL_PRODUCT.to_string())
+    }
+
+    fn runtime_serial() -> String {
+        with_existing_host_bridge(|bridge| bridge.info().identity.serial.clone())
+            .unwrap_or_else(|| VIRTUAL_SERIAL.to_string())
+    }
+
     unsafe fn host_bridge_feature_report(
         profile: VirtualHidProfile,
         buffer: *mut c_void,
         buffer_len: u32,
     ) -> Option<Result<usize, String>> {
-        let bridge = host_bridge()?;
         if buffer.is_null() {
             return Some(Err("null report buffer".to_string()));
         }
 
         let report_id = report_id_from_buffer(buffer as *const u8, buffer_len);
         let output = slice::from_raw_parts_mut(buffer as *mut u8, buffer_len as usize);
-        Some(
-            bridge
-                .copy_feature_report(
-                    profile.interface_number(),
-                    report_id,
-                    output,
-                    host_bridge_command_timeout_ms(),
-                )
-                .map_err(|error| error.to_string()),
-        )
+        with_host_bridge_result("GET_FEATURE", |bridge| {
+            bridge.copy_feature_report(
+                profile.interface_number(),
+                report_id,
+                output,
+                host_bridge_command_timeout_ms(),
+            )
+        })
     }
 
     unsafe fn host_bridge_write_report(
@@ -3647,17 +3763,14 @@ mod windows_proxy {
         buffer: *const c_void,
         buffer_len: u32,
     ) -> Option<Result<u16, String>> {
-        let bridge = host_bridge()?;
         let payload = host_bridge_payload(buffer, buffer_len)?;
-        Some(
-            bridge
-                .write_report(
-                    profile.interface_number(),
-                    payload,
-                    host_bridge_command_timeout_ms(),
-                )
-                .map_err(|error| error.to_string()),
-        )
+        with_host_bridge_result("WRITE", |bridge| {
+            bridge.write_report(
+                profile.interface_number(),
+                payload,
+                host_bridge_command_timeout_ms(),
+            )
+        })
     }
 
     unsafe fn host_bridge_set_feature(
@@ -3665,17 +3778,14 @@ mod windows_proxy {
         buffer: *const c_void,
         buffer_len: u32,
     ) -> Option<Result<u16, String>> {
-        let bridge = host_bridge()?;
         let payload = host_bridge_payload(buffer, buffer_len)?;
-        Some(
-            bridge
-                .set_feature(
-                    profile.interface_number(),
-                    payload,
-                    host_bridge_command_timeout_ms(),
-                )
-                .map_err(|error| error.to_string()),
-        )
+        with_host_bridge_result("SET_FEATURE", |bridge| {
+            bridge.set_feature(
+                profile.interface_number(),
+                payload,
+                host_bridge_command_timeout_ms(),
+            )
+        })
     }
 
     unsafe fn host_bridge_set_output(
@@ -3683,17 +3793,14 @@ mod windows_proxy {
         buffer: *const c_void,
         buffer_len: u32,
     ) -> Option<Result<u16, String>> {
-        let bridge = host_bridge()?;
         let payload = host_bridge_payload(buffer, buffer_len)?;
-        Some(
-            bridge
-                .set_output(
-                    profile.interface_number(),
-                    payload,
-                    host_bridge_command_timeout_ms(),
-                )
-                .map_err(|error| error.to_string()),
-        )
+        with_host_bridge_result("SET_OUTPUT", |bridge| {
+            bridge.set_output(
+                profile.interface_number(),
+                payload,
+                host_bridge_command_timeout_ms(),
+            )
+        })
     }
 
     unsafe fn host_bridge_payload<'a>(buffer: *const c_void, buffer_len: u32) -> Option<&'a [u8]> {
@@ -4778,8 +4885,10 @@ mod windows_proxy {
     }
 
     unsafe fn should_augment_sdl_hid_enumeration(vendor_id: u16, product_id: u16) -> bool {
-        (vendor_id == 0 || vendor_id == VIRTUAL_VENDOR_ID)
-            && (product_id == 0 || product_id == VIRTUAL_PRODUCT_ID)
+        let runtime_vendor_id = runtime_vendor_id();
+        let runtime_product_id = runtime_product_id();
+        (vendor_id == 0 || vendor_id == runtime_vendor_id)
+            && (product_id == 0 || product_id == runtime_product_id)
     }
 
     unsafe fn augment_sdl_hid_enumeration(head: *mut SdlHidDeviceInfo) -> *mut SdlHidDeviceInfo {
@@ -4841,13 +4950,17 @@ mod windows_proxy {
             return;
         }
 
-        (*device_info).path = leak_c_string(&virtual_device_path(profile));
-        (*device_info).vendor_id = VIRTUAL_VENDOR_ID;
-        (*device_info).product_id = VIRTUAL_PRODUCT_ID;
-        (*device_info).serial_number = leak_wide_string(VIRTUAL_SERIAL);
-        (*device_info).release_number = VIRTUAL_VERSION_NUMBER;
-        (*device_info).manufacturer_string = leak_wide_string(VIRTUAL_MANUFACTURER);
-        (*device_info).product_string = leak_wide_string(VIRTUAL_PRODUCT);
+        let path = virtual_device_path(profile);
+        let serial = runtime_serial();
+        let manufacturer = runtime_manufacturer();
+        let product = runtime_product();
+        (*device_info).path = leak_c_string(&path);
+        (*device_info).vendor_id = runtime_vendor_id();
+        (*device_info).product_id = runtime_product_id();
+        (*device_info).serial_number = leak_wide_string(&serial);
+        (*device_info).release_number = runtime_version_number();
+        (*device_info).manufacturer_string = leak_wide_string(&manufacturer);
+        (*device_info).product_string = leak_wide_string(&product);
         (*device_info).usage_page = profile.caps().usage_page;
         (*device_info).usage = profile.caps().usage;
         (*device_info).interface_number = profile.interface_number() as c_int;
@@ -4858,7 +4971,7 @@ mod windows_proxy {
         debug_line(&format!(
             "[crosspuck] SDL_hid_enumerate rewrite profile={} path={:?}",
             profile.label(),
-            virtual_device_path(profile)
+            path
         ));
     }
 
@@ -4866,14 +4979,18 @@ mod windows_proxy {
         let mut head: *mut SdlHidDeviceInfo = ptr::null_mut();
         let mut tail: *mut SdlHidDeviceInfo = ptr::null_mut();
         for profile in profiles.iter().copied() {
+            let path = virtual_device_path(profile);
+            let serial = runtime_serial();
+            let manufacturer = runtime_manufacturer();
+            let product = runtime_product();
             let node = Box::into_raw(Box::new(SdlHidDeviceInfo {
-                path: leak_c_string(&virtual_device_path(profile)),
-                vendor_id: VIRTUAL_VENDOR_ID,
-                product_id: VIRTUAL_PRODUCT_ID,
-                serial_number: leak_wide_string(VIRTUAL_SERIAL),
-                release_number: VIRTUAL_VERSION_NUMBER,
-                manufacturer_string: leak_wide_string(VIRTUAL_MANUFACTURER),
-                product_string: leak_wide_string(VIRTUAL_PRODUCT),
+                path: leak_c_string(&path),
+                vendor_id: runtime_vendor_id(),
+                product_id: runtime_product_id(),
+                serial_number: leak_wide_string(&serial),
+                release_number: runtime_version_number(),
+                manufacturer_string: leak_wide_string(&manufacturer),
+                product_string: leak_wide_string(&product),
                 usage_page: profile.caps().usage_page,
                 usage: profile.caps().usage,
                 interface_number: profile.interface_number() as c_int,
@@ -4893,7 +5010,7 @@ mod windows_proxy {
             debug_line(&format!(
                 "[crosspuck] SDL_hid_enumerate append synthetic profile={} path={:?}",
                 profile.label(),
-                virtual_device_path(profile)
+                path
             ));
         }
         head
@@ -5578,7 +5695,7 @@ mod windows_proxy {
             "mi_{:02x}&col{:02x}#{}&0&{:04x}",
             profile.interface_number(),
             profile.collection_number(),
-            VIRTUAL_SERIAL.to_ascii_lowercase(),
+            runtime_serial().to_ascii_lowercase(),
             profile.instance_suffix()
         )
     }
