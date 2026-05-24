@@ -155,6 +155,10 @@ impl GuestSession {
         self.input.read_input_report()
     }
 
+    pub fn set_input_read_timeout(&self, timeout: Option<Duration>) -> Result<(), GuestError> {
+        self.input.set_read_timeout(timeout)
+    }
+
     pub fn get_feature(
         &mut self,
         interface_number: u8,
@@ -301,6 +305,11 @@ pub struct GuestInput {
 }
 
 impl GuestInput {
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), GuestError> {
+        self.input.set_read_timeout(timeout)?;
+        Ok(())
+    }
+
     pub fn input_queue_len(&self) -> usize {
         self.input_queue.len()
     }

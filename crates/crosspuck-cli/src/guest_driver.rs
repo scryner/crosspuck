@@ -2,11 +2,12 @@ use crosspuck_core::guest::{GuestError, GuestSession, GuestTransportClient, Gues
 use crosspuck_core::protocol::StatusCode;
 use crosspuck_core::transport::TransportAddrs;
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEFAULT_CONTROL_PORT: u16 = 28473;
 const DEFAULT_INPUT_PORT: u16 = 28474;
 const DEFAULT_TIMEOUT_MS: u64 = 2_000;
+const INPUT_DURATION_POLL_MS: u64 = 100;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Config {
@@ -48,6 +49,9 @@ impl Default for Config {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Operation {
     Reports(usize),
+    InputDuration {
+        duration_ms: u64,
+    },
     GetFeature {
         interface_number: u8,
         report_id: u8,
@@ -171,6 +175,9 @@ fn run_operation(
                 }
             }
         }
+        Operation::InputDuration { duration_ms } => {
+            run_input_duration(session, config, *duration_ms)?;
+        }
         Operation::GetFeature {
             interface_number,
             report_id,
@@ -240,6 +247,53 @@ fn run_operation(
     Ok(())
 }
 
+fn run_input_duration(
+    session: &mut GuestSession,
+    config: &Config,
+    duration_ms: u64,
+) -> Result<(), GuestDriverError> {
+    let started_at = Instant::now();
+    let deadline = started_at + Duration::from_millis(duration_ms);
+    let poll_ms = INPUT_DURATION_POLL_MS.min(config.timeout_ms);
+    let poll_timeout = Duration::from_millis(poll_ms);
+    let mut reports = 0_u64;
+    let mut timeouts = 0_u64;
+
+    session.set_input_read_timeout(Some(poll_timeout))?;
+
+    while Instant::now() < deadline {
+        match session.read_input_report() {
+            Ok(report) => {
+                reports += 1;
+                println!(
+                    "INPUT seq={} interface={} role={:?} len={} head={}",
+                    report.sequence,
+                    report.interface_number,
+                    report.role,
+                    report.data.len(),
+                    hex_head(&report.data, 16)
+                );
+            }
+            Err(error) if error.is_timeout_or_would_block() => {
+                timeouts += 1;
+            }
+            Err(error) => {
+                let _ = session.set_input_read_timeout(Some(config.timeout()));
+                return Err(error.into());
+            }
+        }
+    }
+
+    session.set_input_read_timeout(Some(config.timeout()))?;
+    println!(
+        "INPUT_DURATION elapsed_ms={} reports={} timeouts={}",
+        started_at.elapsed().as_millis(),
+        reports,
+        timeouts
+    );
+    Ok(())
+}
+
 fn print_identity(session: &GuestSession) {
     let identity = session.identity();
     println!(
@@ -280,6 +334,15 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Config, GuestDri
                     return Err(message("--reports must be greater than 0"));
                 }
                 config.operations.push(Operation::Reports(count));
+            }
+            "--input-duration-ms" | "--duration-ms" => {
+                let duration_ms = parse_next::<u64>(&mut args, "--input-duration-ms")?;
+                if duration_ms == 0 {
+                    return Err(message("--input-duration-ms must be greater than 0"));
+                }
+                config
+                    .operations
+                    .push(Operation::InputDuration { duration_ms });
             }
             "--timeout-ms" => {
                 let timeout_ms = parse_next::<u64>(&mut args, "--timeout-ms")?;
@@ -369,6 +432,8 @@ Options:
   --reconnect <n>                       connect, run operations, disconnect n times
   --allow-input-timeout                 treat input read timeout as success for --reports
   --reports <n>                         read n input reports
+  --input-duration-ms <ms>              read input reports until duration elapses
+  --duration-ms <ms>                    alias for --input-duration-ms
   --get-feature <interface> <id> <len>  send GET_FEATURE
   --write-hex <interface> <hex>         send WRITE bytes
   --set-feature-hex <interface> <hex>   send SET_FEATURE bytes
@@ -382,6 +447,7 @@ Examples:
   cargo run -p crosspuck-cli -- guest-driver
   cargo run -p crosspuck-cli -- guest-driver --get-feature 2 0x02 64
   cargo run -p crosspuck-cli -- guest-driver --reports 1 --allow-input-timeout
+  cargo run -p crosspuck-cli -- guest-driver --input-duration-ms 5000
   cargo run -p crosspuck-cli -- guest-driver --write-hex 2 82030000
   cargo run -p crosspuck-cli -- guest-driver --reconnect 3
 "#
@@ -506,6 +572,8 @@ mod tests {
             "--allow-input-timeout",
             "--reports",
             "1",
+            "--input-duration-ms",
+            "5000",
             "--get-feature",
             "2",
             "0x02",
@@ -531,6 +599,7 @@ mod tests {
             config.operations,
             vec![
                 Operation::Reports(1),
+                Operation::InputDuration { duration_ms: 5000 },
                 Operation::GetFeature {
                     interface_number: 2,
                     report_id: 0x02,
@@ -569,6 +638,7 @@ mod tests {
     fn parse_rejects_invalid_values() {
         assert!(parse_args(strings(&["--timeout-ms", "0"])).is_err());
         assert!(parse_args(strings(&["--reconnect", "0"])).is_err());
+        assert!(parse_args(strings(&["--input-duration-ms", "0"])).is_err());
         assert!(parse_hex("820").is_err());
         assert!(parse_hex("0x100 00").is_err());
     }
