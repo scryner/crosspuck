@@ -69,12 +69,12 @@ run_window() {
 
   echo
   echo "$prompt"
-  read -r -p "준비되면 Enter를 누르십시오. marker start 후 ${seconds}s 동안 캡처합니다. "
+  read -r -p "Press Enter when ready. Capture will run for ${seconds}s after the start marker. "
   write_marker "$scenario" "start" "$prompt"
-  echo "캡처 중: $scenario (${seconds}s)"
+  echo "Capturing: $scenario (${seconds}s)"
   sleep "$seconds"
   write_marker "$scenario" "end" "$prompt"
-  echo "완료: $scenario"
+  echo "Done: $scenario"
 }
 
 mkdir -p "$(dirname "$log_path")"
@@ -90,8 +90,8 @@ echo "Stdout: $stdout_log"
 echo "Steam:  $steam_bin"
 echo "Cwd:    $steam_dir"
 echo
-echo "Steam이 이미 실행 중이면 완전히 종료한 뒤 다시 실행하십시오."
-echo "이 스크립트는 input report 로그를 기본 비활성화하고 host->controller feedback 경로를 JSONL로 캡처합니다."
+echo "If Steam is already running, quit it completely before launching it again."
+echo "This script disables input-report logging by default and captures host->controller feedback traffic as JSONL."
 echo
 
 abort_if_matches \
@@ -131,32 +131,32 @@ if ! kill -0 "$steam_pid" 2>/dev/null; then
   exit 1
 fi
 
-trap 'write_marker "capture" "end" "script interrupted"; echo; echo "중단됨. Steam은 직접 종료하십시오."; exit 130' INT TERM
+trap 'write_marker "capture" "end" "script interrupted"; echo; echo "Interrupted. Quit Steam manually."; exit 130' INT TERM
 
 echo
-read -r -p "native Steam에서 컨트롤러가 연결된 상태가 되면 Enter를 누르십시오. "
+read -r -p "Press Enter when the controller is connected in native Steam. "
 write_marker "steam_controller_connected" "point" "controller connected in native Steam"
 
 run_window \
   "left_touchpad_haptic" \
   5 \
-  "컨트롤러의 왼쪽 터치패드를 5초간 문지르십시오. 햅틱은 패드 내부 로직일 수 있습니다."
+  "Rub the controller's left touchpad for 5 seconds. Haptics may be handled by controller-local logic."
 
 run_window \
   "right_touchpad_haptic" \
   5 \
-  "컨트롤러의 오른쪽 터치패드를 5초간 문지르십시오. 햅틱은 패드 내부 로직일 수 있습니다."
+  "Rub the controller's right touchpad for 5 seconds. Haptics may be handled by controller-local logic."
 
 run_window \
   "steam_controller_test_ping" \
   5 \
-  "Steam 컨트롤러 테스트 화면의 '핑' 버튼을 누르십시오. 진동/사운드는 ping command 또는 패드 내장 로직일 수 있습니다."
+  "Press the ping button in Steam's controller test screen. Vibration/sound may be a ping command or controller-local logic."
 
 write_marker "capture" "end" "native Steam feedback capture"
 
 echo
-echo "캡처 완료: $log_path"
+echo "Capture complete: $log_path"
 echo "Steam stdout: $stdout_log"
 echo
-echo "분석:"
+echo "Analysis:"
 cargo run -p crosspuck-cli -- --analyze-hid-probe "$log_path"

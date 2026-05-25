@@ -46,19 +46,19 @@ pub enum HostRuntimeState {
 impl HostRuntimeState {
     pub fn menu_view(&self) -> MenuView {
         match self {
-            Self::Starting => MenuView::new("시작 중", "-", "-", "-"),
+            Self::Starting => MenuView::new("Starting", "-", "-", "-"),
             Self::Listening {
                 control_addr,
                 input_addr,
             } => MenuView::new(
-                "Guest 대기 중",
+                "Waiting for guest",
                 "-",
                 &format!("{control_addr}, {input_addr}"),
                 "-",
             ),
-            Self::PuckDisconnected => MenuView::new("Puck 연결 안됨", "-", "-", "-"),
+            Self::PuckDisconnected => MenuView::new("Puck disconnected", "-", "-", "-"),
             Self::PuckConnected { serial } => {
-                MenuView::new("Puck 연결됨", serial.as_str(), "-", "-")
+                MenuView::new("Puck connected", serial.as_str(), "-", "-")
             }
             Self::GuestConnected {
                 session_id,
@@ -66,7 +66,7 @@ impl HostRuntimeState {
                 serial,
                 guest_pid,
             } => MenuView::new(
-                "Guest proxy 연결됨",
+                "Guest proxy connected",
                 serial.as_str(),
                 &format!(
                     "pid={guest_pid}, session={}, id={session_id}",
@@ -74,8 +74,8 @@ impl HostRuntimeState {
                 ),
                 "-",
             ),
-            Self::Degraded { reason } => MenuView::new("오류", "-", "-", reason.as_str()),
-            Self::Stopping => MenuView::new("종료 중", "-", "-", "-"),
+            Self::Degraded { reason } => MenuView::new("Error", "-", "-", reason.as_str()),
+            Self::Stopping => MenuView::new("Stopping", "-", "-", "-"),
         }
     }
 }

@@ -131,7 +131,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("오류: {error}");
+            eprintln!("error: {error}");
             ExitCode::from(1)
         }
     }
@@ -165,7 +165,7 @@ fn run() -> Result<()> {
         return print_identity_json(&config);
     }
 
-    println!("=== [Host PoC] Valve 하드웨어 Raw HID 캡처 시작 ===");
+    println!("=== [Host PoC] Starting Valve hardware raw HID capture ===");
     let api = HidApi::new()?;
 
     let candidates = collect_candidates(&api, &config);
@@ -181,7 +181,7 @@ fn run() -> Result<()> {
 
     let target = choose_target(&candidates)?;
     println!(
-        "대상 장치 선택: VID=0x{:04X}, PID=0x{:04X}, Interface={}, Path={}",
+        "Selected target device: VID=0x{:04X}, PID=0x{:04X}, Interface={}, Path={}",
         target.vendor_id, target.product_id, target.interface_number, target.path
     );
 
@@ -287,7 +287,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Config> {
             }
             unknown => {
                 return Err(CliError::Message(format!(
-                    "알 수 없는 옵션입니다: {unknown}\n\n도움말은 --help를 사용하십시오."
+                    "unknown option: {unknown}\n\nUse --help for usage."
                 )));
             }
         }
@@ -300,8 +300,8 @@ fn print_help() {
     println!(
         r#"crosspuck-host
 
-macOS 호스트에서 Steam Controller 계열 Valve HID 장치를 열고 Raw HID 패킷을 Hex로 출력합니다.
-또는 `guest-driver`/`haptic-loop` 서브커맨드로 host app에 연결하는 로컬 guest test client를 실행합니다.
+Opens Steam Controller Valve HID devices on the macOS host and prints raw HID packets as hex.
+It can also run local guest test clients for the host app with the `guest-driver` and `haptic-loop` subcommands.
 
 Usage:
   cargo run -- [options]
@@ -309,31 +309,31 @@ Usage:
   cargo run -p crosspuck-cli -- haptic-loop [options]
 
 Options:
-  --list                 장치 목록만 출력하고 종료
-  --vid <hex|dec>        Vendor ID 필터 (기본값: 0x28DE)
-  --pid <hex|dec>        Product ID 필터
-  --interface <number>   HID interface number 필터
-  --usage-page <hex|dec> HID usage page 필터
-  --usage <hex|dec>      HID usage 필터
-  --path <path>          특정 HID path 직접 지정
-  --serial <serial>      특정 Puck serial 필터
-  --identity-json        host가 관측한 Puck identity/collection snapshot을 JSON으로 출력
-  --read-size <bytes>    Read buffer 크기 (기본값: 64)
-  --timeout-ms <ms>      read_timeout 대기 시간 (기본값: 1000)
-  --count <n>            n개 패킷 캡처 후 종료
-  --probe-all            필터에 매칭되는 모든 unique HID path를 열고 어느 path가 움직이는지 탐색
-  --duration-ms <ms>     지정한 시간 동안만 실행 후 종료
-  --output <file>        캡처 결과를 JSONL 파일로 저장
-  --verify <file>        JSONL 캡처 파일을 검증하고 종료
+  --list                 List devices and exit
+  --vid <hex|dec>        Vendor ID filter (default: 0x28DE)
+  --pid <hex|dec>        Product ID filter
+  --interface <number>   HID interface number filter
+  --usage-page <hex|dec> HID usage page filter
+  --usage <hex|dec>      HID usage filter
+  --path <path>          Open a specific HID path
+  --serial <serial>      Filter by Puck serial
+  --identity-json        Print the host-observed Puck identity and collection snapshot as JSON
+  --read-size <bytes>    Read buffer size (default: 64)
+  --timeout-ms <ms>      read_timeout wait time (default: 1000)
+  --count <n>            Capture n packets and exit
+  --probe-all            Open every unique matching HID path and identify the active path
+  --duration-ms <ms>     Run for the specified duration and exit
+  --output <file>        Save capture output as JSONL
+  --verify <file>        Verify a JSONL capture file and exit
   --analyze-hid-probe <file>
-                         macOS native Steam HID probe JSONL을 분석하고 종료
+                         Analyze a macOS native Steam HID probe JSONL file and exit
   --analyze-max-events <n>
-                         scenario별 출력할 host->device event 최대 개수 (기본값: 40)
-  --min-packets <n>      verify 시 필요한 최소 packet 수 (기본값: 1)
-  --quiet                캡처 중 packet별 콘솔 출력을 생략
-  guest-driver           host app transport에 연결하는 local mock guest 실행
-  haptic-loop            버튼 입력 시 짧은 Triton rumble feedback을 보내는 local guest test 실행
-  -h, --help             도움말 출력
+                         Maximum host->device events to print per scenario (default: 40)
+  --min-packets <n>      Minimum packets required during verification (default: 1)
+  --quiet                Suppress per-packet console output during capture
+  guest-driver           Run a local mock guest that connects to the host app transport
+  haptic-loop            Run a local guest test that sends short Triton rumble feedback on button input
+  -h, --help             Show help
 
 Examples:
   cargo run -- --list
@@ -362,7 +362,7 @@ fn print_identity_json(config: &Config) -> Result<()> {
     };
     let candidates = collect_core_candidates(&api, &filter);
     let snapshot = build_puck_snapshot(&candidates)
-        .map_err(|error| CliError::Message(format!("identity snapshot 실패: {error}")))?;
+        .map_err(|error| CliError::Message(format!("identity snapshot failed: {error}")))?;
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
@@ -431,11 +431,11 @@ fn collect_candidates(api: &HidApi, config: &Config) -> Vec<DeviceCandidate> {
 
 fn print_devices(candidates: &[DeviceCandidate]) {
     if candidates.is_empty() {
-        println!("검출된 Valve HID 장치가 없습니다.");
+        println!("No Valve HID devices found.");
         return;
     }
 
-    println!("검출된 Valve HID 장치: {}개", candidates.len());
+    println!("Detected Valve HID devices: {}", candidates.len());
     for (index, device) in candidates.iter().enumerate() {
         println!(
             "[{index}] VID=0x{:04X} PID=0x{:04X} Interface={} UsagePage=0x{:04X} Usage=0x{:04X}",
@@ -462,9 +462,9 @@ fn choose_target(candidates: &[DeviceCandidate]) -> Result<&DeviceCandidate> {
         .or_else(|| candidates.first())
         .ok_or_else(|| {
             CliError::Message(
-                "Steam Controller 2 후보 장치를 찾을 수 없습니다. --list로 장치 정보를 확인하십시오."
+                "No Steam Controller 2 candidate device found. Use --list to inspect device information."
                 .into(),
-        )
+            )
         })
 }
 
@@ -481,12 +481,12 @@ fn target_score(device: &DeviceCandidate) -> u16 {
 
 fn open_target(api: &HidApi, target: &DeviceCandidate) -> Result<HidDevice> {
     let path = CString::new(target.path.as_bytes()).map_err(|_| {
-        CliError::Message("HID path에 NUL 바이트가 포함되어 열 수 없습니다.".into())
+        CliError::Message("HID path contains an embedded NUL byte and cannot be opened.".into())
     })?;
 
     api.open_path(path.as_c_str()).map_err(|error| {
         CliError::Message(format!(
-            "장치 개방 실패: {error}\nmacOS 입력 모니터링/블루투스 권한 또는 다른 프로세스의 독점 점유 상태를 확인하십시오."
+            "failed to open device: {error}\nCheck macOS Input Monitoring/Bluetooth permissions and whether another process has exclusive access."
         ))
     })
 }
@@ -502,12 +502,12 @@ fn probe_all(api: &HidApi, candidates: &[DeviceCandidate], config: &Config) -> R
     let unique_candidates = unique_by_path(candidates);
     if unique_candidates.is_empty() {
         return Err(CliError::Message(
-            "probe할 Valve HID 장치가 없습니다. --list로 장치 정보를 확인하십시오.".into(),
+            "No Valve HID devices are available to probe. Use --list to inspect device information.".into(),
         ));
     }
 
     println!(
-        "Probe 시작: unique path={} duration={}ms immediate polling",
+        "Starting probe: unique paths={} duration={}ms immediate polling",
         unique_candidates.len(),
         probe_duration(config).as_millis()
     );
@@ -542,12 +542,13 @@ fn probe_all(api: &HidApi, candidates: &[DeviceCandidate], config: &Config) -> R
 
     if states.is_empty() {
         return Err(CliError::Message(
-            "열 수 있는 HID path가 없습니다. macOS 권한 또는 독점 점유 상태를 확인하십시오.".into(),
+            "No HID paths could be opened. Check macOS permissions or exclusive device ownership."
+                .into(),
         ));
     }
 
     println!(
-        "열린 path={}개. 컨트롤러를 조작하십시오. 입력이 발생하는 path가 있으면 hex report를 출력합니다.",
+        "Opened {} paths. Move the controller; active paths will print hex reports.",
         states.len()
     );
 
@@ -612,7 +613,7 @@ fn probe_duration(config: &Config) -> Duration {
 }
 
 fn print_probe_summary(states: &[ProbeState], total_packets: u64) {
-    println!("Probe 종료. 총 캡처 패킷: {total_packets}개");
+    println!("Probe finished. Total captured packets: {total_packets}");
     for state in states {
         println!("  {:>4} packets  {}", state.packets_seen, state.label);
     }
@@ -693,23 +694,23 @@ impl CaptureWriter {
 
 fn read_packets(device: &HidDevice, target: &DeviceCandidate, config: &Config) -> Result<()> {
     println!(
-        "성공: 하드웨어 스트림에 바인딩되었습니다. read_size={} timeout={}ms count={} duration={}",
+        "Success: bound to the hardware stream. read_size={} timeout={}ms count={} duration={}",
         config.read_size,
         config.timeout_ms,
         config
             .count
             .map(|count| count.to_string())
-            .unwrap_or_else(|| "무제한".to_string()),
+            .unwrap_or_else(|| "unlimited".to_string()),
         config
             .duration_ms
             .map(|duration_ms| format!("{duration_ms}ms"))
-            .unwrap_or_else(|| "무제한".to_string())
+            .unwrap_or_else(|| "unlimited".to_string())
     );
-    println!("컨트롤러 버튼, 트랙패드, 자이로 등을 조작하십시오. 종료: Ctrl+C");
+    println!("Move controller buttons, trackpads, gyro, and other inputs. Stop with Ctrl+C.");
 
     let mut capture = match config.output_path.as_deref() {
         Some(path) => {
-            println!("캡처 파일 저장: {path}");
+            println!("Saving capture file: {path}");
             Some(CaptureWriter::new(path, target, config)?)
         }
         None => None,
@@ -751,7 +752,7 @@ fn read_packets(device: &HidDevice, target: &DeviceCandidate, config: &Config) -
                             total_timeouts,
                         )?;
                     }
-                    println!("요청한 {packets_seen}개 패킷을 캡처하고 종료합니다.");
+                    println!("Captured the requested {packets_seen} packets. Exiting.");
                     return Ok(());
                 }
             }
@@ -760,7 +761,7 @@ fn read_packets(device: &HidDevice, target: &DeviceCandidate, config: &Config) -
                 total_timeouts += 1;
                 if !config.quiet && (timeout_ticks == 1 || timeout_ticks.is_multiple_of(10)) {
                     println!(
-                        "[{:>8.3}s] 대기 중... 패킷 없음 ({}ms timeout)",
+                        "[{:>8.3}s] waiting... no packet ({}ms timeout)",
                         elapsed_seconds(started_at.elapsed()),
                         config.timeout_ms
                     );
@@ -776,7 +777,7 @@ fn read_packets(device: &HidDevice, target: &DeviceCandidate, config: &Config) -
                 capture.write_summary(started_at.elapsed(), packets_seen, total_timeouts)?;
             }
             println!(
-                "지정한 실행 시간이 지나 종료합니다. 캡처된 패킷: {}개",
+                "Configured duration elapsed. Captured packets: {}",
                 packets_seen
             );
             return Ok(());
@@ -807,7 +808,7 @@ fn verify_capture_file(path: &str, config: &Config) -> Result<()> {
         let value: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(error) => {
-                errors.push(format!("line {line_number}: JSON 파싱 실패: {error}"));
+                errors.push(format!("line {line_number}: JSON parse failed: {error}"));
                 continue;
             }
         };
@@ -817,7 +818,7 @@ fn verify_capture_file(path: &str, config: &Config) -> Result<()> {
                 metadata_seen = true;
                 if value.get("schema").and_then(Value::as_str) != Some("crosspuck.host.capture.v1")
                 {
-                    errors.push(format!("line {line_number}: 알 수 없는 schema"));
+                    errors.push(format!("line {line_number}: unknown schema"));
                 }
             }
             Some("packet") => {
@@ -827,32 +828,32 @@ fn verify_capture_file(path: &str, config: &Config) -> Result<()> {
                 let hex = value.get("hex").and_then(Value::as_str);
 
                 let Some(seq) = seq else {
-                    errors.push(format!("line {line_number}: packet.seq 누락"));
+                    errors.push(format!("line {line_number}: missing packet.seq"));
                     continue;
                 };
                 let Some(elapsed_us) = elapsed_us else {
-                    errors.push(format!("line {line_number}: packet.elapsed_us 누락"));
+                    errors.push(format!("line {line_number}: missing packet.elapsed_us"));
                     continue;
                 };
                 let Some(bytes_read) = bytes_read else {
-                    errors.push(format!("line {line_number}: packet.bytes_read 누락"));
+                    errors.push(format!("line {line_number}: missing packet.bytes_read"));
                     continue;
                 };
                 let Some(hex) = hex else {
-                    errors.push(format!("line {line_number}: packet.hex 누락"));
+                    errors.push(format!("line {line_number}: missing packet.hex"));
                     continue;
                 };
 
                 if seq != expected_seq {
                     errors.push(format!(
-                        "line {line_number}: seq 불연속, expected={expected_seq} actual={seq}"
+                        "line {line_number}: non-contiguous seq, expected={expected_seq} actual={seq}"
                     ));
                     expected_seq = seq;
                 }
                 expected_seq += 1;
 
                 if last_elapsed_us.is_some_and(|last| elapsed_us < last) {
-                    errors.push(format!("line {line_number}: elapsed_us가 감소했습니다"));
+                    errors.push(format!("line {line_number}: elapsed_us decreased"));
                 }
                 last_elapsed_us = Some(elapsed_us);
 
@@ -869,7 +870,7 @@ fn verify_capture_file(path: &str, config: &Config) -> Result<()> {
                 }
 
                 if bytes_read == 0 {
-                    errors.push(format!("line {line_number}: 빈 packet"));
+                    errors.push(format!("line {line_number}: empty packet"));
                 }
 
                 *size_counts.entry(bytes_read).or_default() += 1;
@@ -880,18 +881,18 @@ fn verify_capture_file(path: &str, config: &Config) -> Result<()> {
                 summary_packets = value.get("packets").and_then(Value::as_u64);
                 summary_elapsed_ms = value.get("elapsed_ms").and_then(Value::as_u64);
             }
-            Some(other) => errors.push(format!("line {line_number}: 알 수 없는 type={other}")),
-            None => errors.push(format!("line {line_number}: type 누락")),
+            Some(other) => errors.push(format!("line {line_number}: unknown type={other}")),
+            None => errors.push(format!("line {line_number}: missing type")),
         }
     }
 
     if !metadata_seen {
-        errors.push("metadata record가 없습니다".to_string());
+        errors.push("metadata record is missing".to_string());
     }
 
     if packet_count < config.min_packets {
         errors.push(format!(
-            "packet 수가 부족합니다: min={} actual={}",
+            "not enough packets: min={} actual={}",
             config.min_packets, packet_count
         ));
     }
@@ -899,12 +900,13 @@ fn verify_capture_file(path: &str, config: &Config) -> Result<()> {
     match summary_packets {
         Some(summary_packets) if summary_packets != packet_count => {
             errors.push(format!(
-                "summary.packets와 실제 packet 수가 다릅니다: summary={summary_packets} actual={packet_count}"
+                "summary.packets does not match actual packet count: summary={summary_packets} actual={packet_count}"
             ));
         }
         Some(_) => {}
-        None => errors
-            .push("summary record가 없습니다. 정상 종료된 캡처 파일인지 확인하십시오".to_string()),
+        None => errors.push(
+            "summary record is missing. Check whether the capture file ended cleanly".to_string(),
+        ),
     }
 
     let dominant_size = size_counts
@@ -913,7 +915,7 @@ fn verify_capture_file(path: &str, config: &Config) -> Result<()> {
         .map(|(size, count)| (*size, *count));
 
     if errors.is_empty() {
-        println!("검증 성공: {path}");
+        println!("Verification succeeded: {path}");
         println!("  packets: {packet_count}");
         println!(
             "  elapsed: {}ms",
@@ -928,12 +930,12 @@ fn verify_capture_file(path: &str, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    println!("검증 실패: {path}");
+    println!("Verification failed: {path}");
     for error in &errors {
         println!("  - {error}");
     }
     Err(CliError::Message(format!(
-        "캡처 파일 검증 실패: {}개 문제",
+        "capture file verification failed with {} issues",
         errors.len()
     )))
 }
@@ -1011,7 +1013,7 @@ fn analyze_hid_probe_file(path: &str, config: &Config) -> Result<()> {
 
     let windows = scenario_windows(&markers, &feedback_events);
 
-    println!("HID probe 분석: {path}");
+    println!("HID probe analysis: {path}");
     println!("  hid_probe records: {hid_probe_records}");
     println!(
         "  host->device feedback requests: {}",
@@ -1029,9 +1031,9 @@ fn analyze_hid_probe_file(path: &str, config: &Config) -> Result<()> {
     }
 
     if feedback_events.is_empty() {
-        println!("  host->device feedback request가 없습니다.");
+        println!("  no host->device feedback requests found.");
         println!(
-            "  DYLD interpose 적용 여부, Steam 재시작 여부, LOG_INPUT/LOG_GET 설정을 확인하십시오."
+            "  Check DYLD interpose injection, Steam restart state, and LOG_INPUT/LOG_GET settings."
         );
         return Ok(());
     }
@@ -1199,7 +1201,7 @@ fn print_scenario_feedback_summary(
     println!("  host->device requests: {}", scoped.len());
 
     if scoped.is_empty() {
-        println!("  이 window 안에는 feedback request가 없습니다.");
+        println!("  no feedback requests in this window.");
         return;
     }
 
@@ -1305,33 +1307,32 @@ fn format_hex(bytes: &[u8]) -> String {
 fn parse_hex_bytes(hex: &str) -> std::result::Result<Vec<u8>, String> {
     hex.split_whitespace()
         .map(|word| {
-            u8::from_str_radix(word, 16)
-                .map_err(|_| format!("hex byte를 파싱할 수 없습니다: {word}"))
+            u8::from_str_radix(word, 16).map_err(|_| format!("failed to parse hex byte: {word}"))
         })
         .collect()
 }
 
 fn require_value(flag: &str, value: Option<String>) -> Result<String> {
-    value.ok_or_else(|| CliError::Message(format!("{flag} 옵션에는 값이 필요합니다.")))
+    value.ok_or_else(|| CliError::Message(format!("{flag} requires a value.")))
 }
 
 fn parse_u16_arg(flag: &str, value: Option<String>) -> Result<u16> {
     let raw = require_value(flag, value)?;
     parse_prefixed_u64(&raw)
         .and_then(|value| u16::try_from(value).ok())
-        .ok_or_else(|| CliError::Message(format!("{flag} 값이 u16 범위를 벗어났습니다: {raw}")))
+        .ok_or_else(|| CliError::Message(format!("{flag} value is out of u16 range: {raw}")))
 }
 
 fn parse_u64_arg(flag: &str, value: Option<String>) -> Result<u64> {
     let raw = require_value(flag, value)?;
     parse_prefixed_u64(&raw)
-        .ok_or_else(|| CliError::Message(format!("{flag} 값을 숫자로 해석할 수 없습니다: {raw}")))
+        .ok_or_else(|| CliError::Message(format!("{flag} value is not a valid number: {raw}")))
 }
 
 fn parse_i32_arg(flag: &str, value: Option<String>) -> Result<i32> {
     let raw = require_value(flag, value)?;
     raw.parse::<i32>()
-        .map_err(|_| CliError::Message(format!("{flag} 값을 i32 숫자로 해석할 수 없습니다: {raw}")))
+        .map_err(|_| CliError::Message(format!("{flag} value is not a valid i32 number: {raw}")))
 }
 
 fn parse_usize_arg(flag: &str, value: Option<String>) -> Result<usize> {
@@ -1339,9 +1340,7 @@ fn parse_usize_arg(flag: &str, value: Option<String>) -> Result<usize> {
     parse_prefixed_u64(&raw)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| {
-            CliError::Message(format!(
-                "{flag} 값을 usize 숫자로 해석할 수 없습니다: {raw}"
-            ))
+            CliError::Message(format!("{flag} value is not a valid usize number: {raw}"))
         })
 }
 

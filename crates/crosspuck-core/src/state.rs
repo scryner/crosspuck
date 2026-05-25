@@ -10,10 +10,10 @@ pub enum ServiceState {
 impl ServiceState {
     pub fn menu_label(&self) -> String {
         match self {
-            Self::PuckDisconnected => "Puck 연결 안됨".to_string(),
-            Self::PuckConnected { serial } => format!("Puck 연결됨 ({serial})"),
+            Self::PuckDisconnected => "Puck disconnected".to_string(),
+            Self::PuckConnected { serial } => format!("Puck connected ({serial})"),
             Self::GuestProxyConnected { serial, guest } => {
-                format!("Guest proxy 연결됨 ({serial}, {guest})")
+                format!("Guest proxy connected ({serial}, {guest})")
             }
         }
     }

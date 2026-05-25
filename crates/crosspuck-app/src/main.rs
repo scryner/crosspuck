@@ -173,7 +173,7 @@ mod macos {
         let empty_key = NSString::from_str("");
         let state_items = StateMenuItems {
             status: menu.addItemWithTitle_action_keyEquivalent(
-                &NSString::from_str("상태: 시작 중"),
+                &NSString::from_str("Status: Starting"),
                 None,
                 &empty_key,
             ),
@@ -188,7 +188,7 @@ mod macos {
                 &empty_key,
             ),
             error: menu.addItemWithTitle_action_keyEquivalent(
-                &NSString::from_str("최근 오류: -"),
+                &NSString::from_str("Last error: -"),
                 None,
                 &empty_key,
             ),
@@ -214,7 +214,7 @@ mod macos {
         menu.addItem(&separator);
 
         let quit_controller = QuitController::new(mtm, app.clone(), service_handle);
-        let quit_title = NSString::from_str("종료");
+        let quit_title = NSString::from_str("Quit");
         let quit_key = NSString::from_str("q");
         let quit_item =
             menu.addItemWithTitle_action_keyEquivalent(&quit_title, Some(sel!(quit:)), &quit_key);
@@ -237,7 +237,7 @@ mod macos {
         let view = app_state.snapshot().menu_view();
         items
             .status
-            .setTitle(&NSString::from_str(&format!("상태: {}", view.status)));
+            .setTitle(&NSString::from_str(&format!("Status: {}", view.status)));
         items
             .puck
             .setTitle(&NSString::from_str(&format!("Puck: {}", view.puck)));
@@ -246,7 +246,7 @@ mod macos {
             .setTitle(&NSString::from_str(&format!("Guest: {}", view.guest)));
         items
             .error
-            .setTitle(&NSString::from_str(&format!("최근 오류: {}", view.error)));
+            .setTitle(&NSString::from_str(&format!("Last error: {}", view.error)));
     }
 
     unsafe fn load_status_icon() -> Option<Retained<NSImage>> {
