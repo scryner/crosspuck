@@ -7,7 +7,7 @@ pub mod runtime;
 pub mod trace;
 
 pub use bridge::{HostBridge, HostBridgeConfig, HostBridgeError, HostBridgeInputStats};
-pub use config::RuntimeConfig;
+pub use config::{GuestLogLevel, RuntimeConfig};
 pub use handles::{VirtualHandleId, VirtualHandleTable};
 pub use identity::{RuntimeIdentity, RuntimeIdentityState};
 pub use profile::{

@@ -1,3 +1,4 @@
+use crosspuck_core::guest_driver::GuestLogLevel;
 use crosspuck_core::protocol::{session_trace_label, SESSION_TRACE_ID_MASK};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
@@ -7,7 +8,12 @@ use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
 
 static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+static LOG_LEVEL: OnceLock<GuestLogLevel> = OnceLock::new();
 static SESSION_TRACE_ID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+
+pub fn set_log_level(level: GuestLogLevel) {
+    let _ = LOG_LEVEL.set(level);
+}
 
 pub fn set_session_trace_id(session_trace_id: Option<u32>) {
     let Ok(mut guard) = SESSION_TRACE_ID.get_or_init(|| Mutex::new(None)).lock() else {
@@ -17,6 +23,25 @@ pub fn set_session_trace_id(session_trace_id: Option<u32>) {
 }
 
 pub fn debug_line(message: &str) {
+    write_line(GuestLogLevel::Debug, message);
+}
+
+pub fn error_line(message: &str) {
+    write_line(GuestLogLevel::Error, message);
+}
+
+pub fn info_line(message: &str) {
+    write_line(GuestLogLevel::Info, message);
+}
+
+pub fn trace_line(message: &str) {
+    write_line(GuestLogLevel::Trace, message);
+}
+
+fn write_line(level: GuestLogLevel, message: &str) {
+    if !current_log_level().allows(level) {
+        return;
+    }
     let message = decorate_message(message);
     append_file_line(&message);
     let Ok(message) = CString::new(message) else {
@@ -25,6 +50,13 @@ pub fn debug_line(message: &str) {
     unsafe {
         OutputDebugStringA(message.as_ptr() as _);
     }
+}
+
+fn current_log_level() -> GuestLogLevel {
+    LOG_LEVEL
+        .get()
+        .copied()
+        .unwrap_or(crosspuck_core::guest_driver::config::DEFAULT_LOG_LEVEL)
 }
 
 fn decorate_message(message: &str) -> String {

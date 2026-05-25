@@ -1,4 +1,8 @@
-use super::{hooks, log::debug_line, state};
+use super::{
+    hooks,
+    log::{debug_line, error_line, info_line, set_log_level},
+    state,
+};
 use crosspuck_core::guest_driver::RuntimeConfig;
 use std::ffi::c_void;
 use std::panic;
@@ -32,6 +36,7 @@ pub unsafe extern "system" fn DllMain(
 
 fn attach() {
     let config = RuntimeConfig::driver_from_env();
+    set_log_level(config.log_level);
     let host_bridge_enabled = config.host_bridge_enabled;
     let host_bridge_required = config.host_bridge_required;
     let trace_reports = config.trace_reports;
@@ -53,12 +58,12 @@ fn attach() {
     }
 
     if let Err(error) = hooks::install() {
-        debug_line(&format!("[crosspuck] hook install failed: {error}"));
+        error_line(&format!("[crosspuck] hook install failed: {error}"));
     } else {
         debug_line("[crosspuck] hook install ok");
     }
 
-    debug_line(&format!(
+    info_line(&format!(
         "[crosspuck] crosspuck-driver attached pid={} process={} host_bridge={} required={} trace={} bridge_connect_allowed={} connect_timeout_ms={} handshake_timeout_ms={} io_timeout_ms={} reconnect_interval_ms={}",
         std::process::id(),
         process,
@@ -72,7 +77,7 @@ fn attach() {
         reconnect_interval_ms
     ));
     if host_bridge_enabled {
-        debug_line("[crosspuck] startup bridge connect skipped: lazy connect enabled");
+        info_line("[crosspuck] startup bridge connect skipped: lazy connect enabled");
         if bridge_connect_allowed {
             state::start_bridge_connector("steam startup");
         }

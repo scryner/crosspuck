@@ -7,6 +7,7 @@ mod hidp;
 mod hooks;
 mod kernel32;
 mod log;
+mod proc;
 mod real_hid;
 mod sdl;
 mod setupapi;

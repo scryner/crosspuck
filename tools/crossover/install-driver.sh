@@ -16,6 +16,7 @@ Options:
   --driver PATH       hid.dll path. Defaults to target/x86_64-pc-windows-gnu/release/hid.dll.
   --steam-dir PATH    Steam directory inside the bottle. Auto-detected from Steam.exe.
   --log-file PATH     Unix path for the driver log file. Defaults to the Steam directory.
+  --log-level LEVEL   Set CROSSPUCK_LOG_LEVEL. Defaults to info.
   --trace 0|1         Set CROSSPUCK_TRACE_REPORTS. Defaults to 1.
   --required 0|1      Set CROSSPUCK_HOST_BRIDGE_REQUIRED. Defaults to 1.
   --help              Show this help.
@@ -33,6 +34,7 @@ bottle_path=""
 driver_path="$repo_root/target/x86_64-pc-windows-gnu/release/hid.dll"
 steam_dir=""
 log_file=""
+log_level="info"
 trace_reports="1"
 required="1"
 
@@ -56,6 +58,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --log-file)
       log_file="${2:?missing value for --log-file}"
+      shift 2
+      ;;
+    --log-level)
+      log_level="${2:?missing value for --log-level}"
       shift 2
       ;;
     --trace)
@@ -147,6 +153,7 @@ Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\\Environment]
 "CROSSPUCK_HOST_BRIDGE"="1"
 "CROSSPUCK_HOST_BRIDGE_REQUIRED"="$required"
+"CROSSPUCK_LOG_LEVEL"="$log_level"
 "CROSSPUCK_TRACE_REPORTS"="$trace_reports"
 "CROSSPUCK_TRACE_REPORT_LIMIT"="2048"
 "CROSSPUCK_TRACE_REPORT_MAX_BYTES"="128"

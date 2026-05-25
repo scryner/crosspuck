@@ -55,6 +55,7 @@ DLL 경로를 직접 지정하려면:
 tools/crossover/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
+  --log-level trace \
   --trace 1 \
   --required 1
 ```
@@ -92,6 +93,7 @@ CrossOver에서 Steam bottle을 선택한 뒤 Run Command로 `regedit`를 실행
 ```text
 CROSSPUCK_HOST_BRIDGE=1
 CROSSPUCK_HOST_BRIDGE_REQUIRED=1
+CROSSPUCK_LOG_LEVEL=info
 CROSSPUCK_TRACE_REPORTS=1
 CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS=1000
 CROSSPUCK_HOST_BRIDGE_HANDSHAKE_TIMEOUT_MS=2000
@@ -119,8 +121,11 @@ hid = native,builtin
 ```text
 CROSSPUCK_HOST_BRIDGE=1
 CROSSPUCK_HOST_BRIDGE_REQUIRED=1
+CROSSPUCK_LOG_LEVEL=info
 CROSSPUCK_TRACE_REPORTS=1
 ```
+
+`CROSSPUCK_LOG_LEVEL=debug`는 hook/discovery 진단 로그를 켜고, `CROSSPUCK_LOG_LEVEL=trace`와 `CROSSPUCK_TRACE_REPORTS=1`을 함께 쓰면 payload trace까지 기록합니다.
 
 설치 스크립트는 `.reg` 파일을 생성하지만, 현재는 bottle registry에 자동 import하지 않습니다. trace 설정을 명시하고 싶거나 CrossOver UI에서 override 상태를 확실히 남기고 싶다면 위 import 단계를 직접 수행합니다.
 
@@ -153,10 +158,11 @@ CrossOver에서 Steam bottle의 Steam을 실행합니다.
 초기 기대 로그:
 
 ```text
-[crosspuck] hook install ok
 [crosspuck] crosspuck-driver attached host_bridge=true required=true trace=true
 [crosspuck] startup bridge connect skipped: lazy connect enabled
 ```
+
+`hook install ok`와 API discovery 세부 로그는 debug level 로그이므로 `CROSSPUCK_LOG_LEVEL=debug` 또는 `trace`일 때만 나옵니다.
 
 host bridge는 Steam이 HID discovery를 하거나 synthetic path를 여는 시점에 lazy로 연결됩니다.
 
@@ -186,7 +192,7 @@ Steam에서 다음을 직접 확인합니다.
 8. host app을 다시 실행합니다.
 9. controller settings/test UI를 다시 열거나 입력을 다시 수행해 복구 여부를 확인합니다.
 
-입력/feature/write가 실제로 호출되면 trace가 켜진 상태에서 다음 계열 로그가 나옵니다.
+입력/feature/write가 실제로 호출되면 `CROSSPUCK_LOG_LEVEL=trace`와 `CROSSPUCK_TRACE_REPORTS=1` 상태에서 다음 계열 로그가 나옵니다.
 
 ```text
 SDL_hid_enumerate
@@ -229,7 +235,7 @@ tools/crossover/smoke-check.sh --bottle Steam
 
 - Steam process가 crash하지 않습니다.
 - 로그에 `crosspuck-driver attached`가 있습니다.
-- 로그에 `hook install ok`가 있습니다.
+- debug 또는 trace log level에서는 로그에 `hook install ok`가 있습니다.
 - host app 실행 상태에서 `lazy bridge connect ok` 또는 이후 host-backed HID 호출 trace가 있습니다.
 - Steam UI에서 controller가 연결된 장치로 표시되거나 입력 반응이 있습니다.
 - host app 종료/재실행 후 Steam이 crash하지 않고, 이후 controller 관련 동작이 복구됩니다.

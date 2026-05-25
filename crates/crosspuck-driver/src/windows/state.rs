@@ -1,4 +1,4 @@
-use super::log::{debug_line, set_session_trace_id};
+use super::log::{debug_line, error_line, info_line, set_session_trace_id};
 use crosspuck_core::guest_driver::{
     GuestDriverRuntime, GuestDriverSnapshot, RuntimeConfig, RuntimeIdentityState,
     VirtualHidProfileCatalog,
@@ -58,7 +58,7 @@ pub fn catalog(reason: &'static str) -> Option<VirtualHidProfileCatalog> {
         Ok(catalog) => catalog,
         Err(error) => {
             set_session_trace_id(runtime.session_trace_id());
-            debug_line(&format!(
+            error_line(&format!(
                 "[crosspuck] lazy bridge connect failed reason={reason}: {error}"
             ));
             return None;
@@ -86,7 +86,7 @@ pub fn start_bridge_connector(reason: &'static str) {
             let snapshot = runtime.snapshot();
             if snapshot.bridge_connected {
                 set_session_trace_id(snapshot.session_trace_id);
-                debug_line(&format!(
+                info_line(&format!(
                     "[crosspuck] background bridge connector already connected reason={reason} identity={:?} profiles={}",
                     snapshot.identity_state, snapshot.advertised_profiles
                 ));
@@ -100,7 +100,7 @@ pub fn start_bridge_connector(reason: &'static str) {
                 Ok(()) => {
                     set_session_trace_id(runtime.session_trace_id());
                     let snapshot = runtime.snapshot();
-                    debug_line(&format!(
+                    info_line(&format!(
                         "[crosspuck] background bridge connect ok reason={reason} identity={:?} profiles={} open_handles={}",
                         snapshot.identity_state, snapshot.advertised_profiles, snapshot.open_handles
                     ));
@@ -108,7 +108,7 @@ pub fn start_bridge_connector(reason: &'static str) {
                 }
                 Err(error) => {
                     set_session_trace_id(runtime.session_trace_id());
-                    debug_line(&format!(
+                    error_line(&format!(
                         "[crosspuck] background bridge connect failed attempt={attempt}/8 reason={reason}: {error}"
                     ));
                 }
@@ -148,25 +148,25 @@ fn log_catalog_state(
         return;
     };
     let changed = last.as_ref() != Some(&state);
-    if !changed && !(catalog_available && !before.bridge_connected && after.bridge_connected) {
+    if !(changed || catalog_available && !before.bridge_connected && after.bridge_connected) {
         return;
     }
 
     if after.bridge_connected {
         set_session_trace_id(after.session_trace_id);
-        debug_line(&format!(
+        info_line(&format!(
             "[crosspuck] lazy bridge connect ok reason={reason} identity={:?} profiles={} open_handles={}",
             after.identity_state, after.advertised_profiles, after.open_handles
         ));
     } else if catalog_available {
         set_session_trace_id(None);
-        debug_line(&format!(
+        info_line(&format!(
             "[crosspuck] catalog available without live bridge reason={reason} identity={:?} profiles={}",
             after.identity_state, after.advertised_profiles
         ));
     } else if before.bridge_connected {
         set_session_trace_id(None);
-        debug_line(&format!(
+        error_line(&format!(
             "[crosspuck] bridge disconnected reason={reason} identity={:?} profiles={}",
             after.identity_state, after.advertised_profiles
         ));

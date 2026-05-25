@@ -3,7 +3,8 @@ use super::buffers::{
 };
 use super::errors::{set_last_error_for, ERROR_DEVICE_NOT_CONNECTED_CODE};
 use super::handles::{handle_for_profile, profile_for_handle, profile_for_open_handle};
-use super::log::debug_line;
+use super::log::{debug_line, error_line, trace_line};
+use super::proc::fn_from_mut;
 use super::state;
 use crosspuck_core::guest_driver::{path_may_be_virtual, VirtualHandleId, VirtualHidProfile};
 use std::ffi::c_void;
@@ -60,37 +61,37 @@ static OPEN_SENTINELS: OnceLock<Mutex<Vec<(VirtualHidProfile, VirtualHandleId)>>
 
 pub fn set_original_create_file_w(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_CREATE_FILE_W
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "CreateFileW trampoline already initialized".to_string())
 }
 
 pub fn set_original_create_file_a(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_CREATE_FILE_A
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "CreateFileA trampoline already initialized".to_string())
 }
 
 pub fn set_original_read_file(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_READ_FILE
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "ReadFile trampoline already initialized".to_string())
 }
 
 pub fn set_original_write_file(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_WRITE_FILE
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "WriteFile trampoline already initialized".to_string())
 }
 
 pub fn set_original_close_handle(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_CLOSE_HANDLE
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "CloseHandle trampoline already initialized".to_string())
 }
 
 pub fn set_original_device_io_control(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_DEVICE_IO_CONTROL
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "DeviceIoControl trampoline already initialized".to_string())
 }
 
@@ -304,7 +305,7 @@ unsafe fn claim_virtual_path(path: &str) -> Option<HANDLE> {
             Some(handle)
         }
         Err(error) => {
-            debug_line(&format!(
+            error_line(&format!(
                 "[crosspuck] CreateFile virtual failed profile={} path={path:?} error={error}",
                 profile.label()
             ));
@@ -353,7 +354,7 @@ unsafe fn read_virtual_file(
             if !bytes_read.is_null() {
                 *bytes_read = 0;
             }
-            debug_line(&format!(
+            error_line(&format!(
                 "[crosspuck] ReadFile virtual failed profile={} requested={} error={error}",
                 profile.label(),
                 bytes_to_read
@@ -396,7 +397,7 @@ unsafe fn write_virtual_file(
             if !bytes_written.is_null() {
                 *bytes_written = 0;
             }
-            debug_line(&format!(
+            error_line(&format!(
                 "[crosspuck] WriteFile virtual failed profile={} requested={} error={error}",
                 profile.label(),
                 bytes_to_write
@@ -481,13 +482,13 @@ unsafe fn trace_virtual_ioctl(
         return;
     };
     if let Some(rendered) = runtime.trace_payload(payload) {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] DeviceIoControl code=0x{io_control_code:08X} in={} out={} payload={rendered}",
             payload.len(),
             out_buffer_size
         ));
     } else {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] DeviceIoControl code=0x{io_control_code:08X} in={} out={out_buffer_size}",
             payload.len()
         ));
@@ -499,7 +500,7 @@ fn trace_virtual_payload(profile: VirtualHidProfile, operation: &str, payload: &
         return;
     };
     if let Some(rendered) = runtime.trace_payload(payload) {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} profile={} len={} payload={rendered}",
             profile.label(),
             payload.len()

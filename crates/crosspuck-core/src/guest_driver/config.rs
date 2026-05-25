@@ -10,6 +10,46 @@ pub const DEFAULT_LAZY_RECONNECT_INTERVAL: Duration = Duration::from_millis(1_00
 pub const DEFAULT_INPUT_QUEUE_CAPACITY: usize = 64;
 pub const DEFAULT_TRACE_REPORT_LIMIT: usize = 2048;
 pub const DEFAULT_TRACE_REPORT_MAX_BYTES: usize = 128;
+pub const DEFAULT_LOG_LEVEL: GuestLogLevel = GuestLogLevel::Info;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum GuestLogLevel {
+    Off,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl GuestLogLevel {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "error" => Some(Self::Error),
+            "warn" | "warning" => Some(Self::Warn),
+            "info" => Some(Self::Info),
+            "debug" => Some(Self::Debug),
+            "trace" => Some(Self::Trace),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+
+    pub fn allows(self, level: Self) -> bool {
+        level != Self::Off && self >= level
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
@@ -25,6 +65,7 @@ pub struct RuntimeConfig {
     pub input_queue_capacity: usize,
     pub trace_report_limit: usize,
     pub trace_report_max_bytes: usize,
+    pub log_level: GuestLogLevel,
     pub guest_label: String,
 }
 
@@ -103,6 +144,7 @@ impl RuntimeConfig {
                 "CROSSPUCK_TRACE_REPORT_MAX_BYTES",
                 DEFAULT_TRACE_REPORT_MAX_BYTES,
             ),
+            log_level: env_log_level(lookup, "CROSSPUCK_LOG_LEVEL", DEFAULT_LOG_LEVEL),
             guest_label: lookup("CROSSPUCK_GUEST_LABEL")
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "crosspuck-driver".to_string()),
@@ -140,6 +182,7 @@ impl Default for RuntimeConfig {
             input_queue_capacity: DEFAULT_INPUT_QUEUE_CAPACITY,
             trace_report_limit: DEFAULT_TRACE_REPORT_LIMIT,
             trace_report_max_bytes: DEFAULT_TRACE_REPORT_MAX_BYTES,
+            log_level: DEFAULT_LOG_LEVEL,
             guest_label: "crosspuck-driver".to_string(),
         }
     }
@@ -173,6 +216,16 @@ fn env_usize(lookup: &mut impl FnMut(&str) -> Option<String>, name: &str, defaul
         .unwrap_or(default)
 }
 
+fn env_log_level(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    name: &str,
+    default: GuestLogLevel,
+) -> GuestLogLevel {
+    lookup(name)
+        .and_then(|value| GuestLogLevel::parse(&value))
+        .unwrap_or(default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +251,7 @@ mod tests {
         assert!(config.host_bridge_required);
         assert!(!config.replay_enabled);
         assert!(config.trace_reports);
+        assert_eq!(config.log_level, GuestLogLevel::Info);
         assert!(!config.allow_debug_fallback());
         assert_eq!(config.connect_timeout, DEFAULT_CONNECT_TIMEOUT);
         assert_eq!(config.handshake_timeout, DEFAULT_HANDSHAKE_TIMEOUT);
@@ -215,6 +269,7 @@ mod tests {
             ("CROSSPUCK_HOST_BRIDGE_REQUIRED", "0"),
             ("CROSSPUCK_REPLAY_ENABLED", "1"),
             ("CROSSPUCK_TRACE_REPORTS", "1"),
+            ("CROSSPUCK_LOG_LEVEL", "debug"),
         ]);
         let config = RuntimeConfig::driver_from_lookup(|name| {
             values.get(name).map(|value| value.to_string())
@@ -224,6 +279,7 @@ mod tests {
         assert!(!config.host_bridge_required);
         assert!(config.replay_enabled);
         assert!(config.trace_reports);
+        assert_eq!(config.log_level, GuestLogLevel::Debug);
         assert!(config.allow_debug_fallback());
     }
 
@@ -247,6 +303,7 @@ mod tests {
             ("CROSSPUCK_HOST_BRIDGE_HANDSHAKE_TIMEOUT_MS", "1500"),
             ("CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS", "75"),
             ("CROSSPUCK_INPUT_QUEUE_CAPACITY", "8"),
+            ("CROSSPUCK_LOG_LEVEL", "trace"),
         ]);
         let config =
             RuntimeConfig::from_lookup(|name| values.get(name).map(|value| value.to_string()));
@@ -258,5 +315,15 @@ mod tests {
         assert_eq!(config.handshake_timeout, Duration::from_millis(1_500));
         assert_eq!(config.io_timeout, Duration::from_millis(75));
         assert_eq!(config.input_queue_capacity, 8);
+        assert_eq!(config.log_level, GuestLogLevel::Trace);
+    }
+
+    #[test]
+    fn invalid_log_level_uses_default() {
+        let values = HashMap::from([("CROSSPUCK_LOG_LEVEL", "verbose")]);
+        let config =
+            RuntimeConfig::from_lookup(|name| values.get(name).map(|value| value.to_string()));
+
+        assert_eq!(config.log_level, GuestLogLevel::Info);
     }
 }

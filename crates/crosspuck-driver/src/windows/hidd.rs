@@ -6,7 +6,8 @@ use super::errors::{set_last_error_for, ERROR_DEVICE_NOT_CONNECTED_CODE};
 use super::handles::{
     preparsed_for_profile, profile_for_handle, profile_for_open_handle, profile_for_preparsed,
 };
-use super::log::debug_line;
+use super::log::{debug_line, error_line, trace_line};
+use super::proc::fn_from_const;
 use super::real_hid;
 use super::state;
 use crosspuck_core::guest_driver::VirtualHidProfile;
@@ -236,7 +237,7 @@ pub unsafe extern "system" fn HidD_GetInputReport(
             TRUE_U8
         }
         Err(error) => {
-            debug_line(&format!(
+            error_line(&format!(
                 "[crosspuck] HidD_GetInputReport virtual failed profile={} requested={} error={error}",
                 profile.label(),
                 report_buffer_len
@@ -285,7 +286,7 @@ pub unsafe extern "system" fn HidD_GetFeature(
             TRUE_U8
         }
         Err(error) => {
-            debug_line(&format!(
+            error_line(&format!(
                 "[crosspuck] HidD_GetFeature virtual failed profile={} report_id=0x{report_id:02X} requested={} error={error}",
                 profile.label(),
                 report_buffer_len
@@ -333,7 +334,7 @@ pub unsafe extern "system" fn HidD_SetFeature(
             TRUE_U8
         }
         Err(error) => {
-            debug_line(&format!(
+            error_line(&format!(
                 "[crosspuck] HidD_SetFeature virtual failed profile={} len={} error={error}",
                 profile.label(),
                 payload.len()
@@ -381,7 +382,7 @@ pub unsafe extern "system" fn HidD_SetOutputReport(
             TRUE_U8
         }
         Err(error) => {
-            debug_line(&format!(
+            error_line(&format!(
                 "[crosspuck] HidD_SetOutputReport virtual failed profile={} len={} error={error}",
                 profile.label(),
                 payload.len()
@@ -467,7 +468,7 @@ unsafe fn open_virtual_profile(device: HANDLE) -> Result<Option<VirtualHidProfil
 unsafe fn call_real_hidd_get_attributes(device: HANDLE, attributes: *mut HiddAttributes) -> u8 {
     type RealFn = unsafe extern "system" fn(HANDLE, *mut HiddAttributes) -> u8;
     real_hid::resolve_proc("HidD_GetAttributes")
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(device, attributes))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(device, attributes))
         .unwrap_or(FALSE_U8)
 }
 
@@ -477,14 +478,14 @@ unsafe fn call_real_hidd_get_preparsed_data(
 ) -> u8 {
     type RealFn = unsafe extern "system" fn(HANDLE, *mut *mut c_void) -> u8;
     real_hid::resolve_proc("HidD_GetPreparsedData")
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(device, preparsed_data))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(device, preparsed_data))
         .unwrap_or(FALSE_U8)
 }
 
 unsafe fn call_real_hidd_free_preparsed_data(preparsed_data: *mut c_void) -> u8 {
     type RealFn = unsafe extern "system" fn(*mut c_void) -> u8;
     real_hid::resolve_proc("HidD_FreePreparsedData")
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(preparsed_data))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(preparsed_data))
         .unwrap_or(FALSE_U8)
 }
 
@@ -496,7 +497,7 @@ unsafe fn call_real_hidd_string(
 ) -> u8 {
     type RealFn = unsafe extern "system" fn(HANDLE, *mut c_void, u32) -> u8;
     real_hid::resolve_proc(name)
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(device, buffer, buffer_len))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(device, buffer, buffer_len))
         .unwrap_or(FALSE_U8)
 }
 
@@ -508,7 +509,7 @@ unsafe fn call_real_hidd_indexed_string(
 ) -> u8 {
     type RealFn = unsafe extern "system" fn(HANDLE, u32, *mut c_void, u32) -> u8;
     real_hid::resolve_proc("HidD_GetIndexedString")
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(device, string_index, buffer, buffer_len))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(device, string_index, buffer, buffer_len))
         .unwrap_or(FALSE_U8)
 }
 
@@ -520,28 +521,28 @@ unsafe fn call_real_hidd_report(
 ) -> u8 {
     type RealFn = unsafe extern "system" fn(HANDLE, *mut c_void, u32) -> u8;
     real_hid::resolve_proc(name)
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(device, report_buffer, report_buffer_len))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(device, report_buffer, report_buffer_len))
         .unwrap_or(FALSE_U8)
 }
 
 unsafe fn call_real_hidd_handle_bool(name: &str, device: HANDLE) -> u8 {
     type RealFn = unsafe extern "system" fn(HANDLE) -> u8;
     real_hid::resolve_proc(name)
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(device))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(device))
         .unwrap_or(FALSE_U8)
 }
 
 unsafe fn call_real_hidd_set_num_input_buffers(device: HANDLE, count: u32) -> u8 {
     type RealFn = unsafe extern "system" fn(HANDLE, u32) -> u8;
     real_hid::resolve_proc("HidD_SetNumInputBuffers")
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(device, count))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(device, count))
         .unwrap_or(FALSE_U8)
 }
 
 unsafe fn call_real_hidd_get_num_input_buffers(device: HANDLE, count: *mut u32) -> u8 {
     type RealFn = unsafe extern "system" fn(HANDLE, *mut u32) -> u8;
     real_hid::resolve_proc("HidD_GetNumInputBuffers")
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(device, count))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(device, count))
         .unwrap_or(FALSE_U8)
 }
 
@@ -550,7 +551,7 @@ fn trace_virtual_payload(profile: VirtualHidProfile, operation: &str, payload: &
         return;
     };
     if let Some(rendered) = runtime.trace_payload(payload) {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} profile={} len={} payload={rendered}",
             profile.label(),
             payload.len()

@@ -1,5 +1,6 @@
 use super::handles::profile_for_preparsed;
 use super::log::debug_line;
+use super::proc::fn_from_const;
 use super::real_hid;
 use super::state;
 use std::ffi::c_void;
@@ -82,6 +83,6 @@ pub unsafe extern "system" fn HidP_GetCaps(
 unsafe fn call_real_hidp_get_caps(preparsed_data: *mut c_void, caps: *mut HidpCaps) -> i32 {
     type RealFn = unsafe extern "system" fn(*mut c_void, *mut HidpCaps) -> i32;
     real_hid::resolve_proc("HidP_GetCaps")
-        .map(|ptr| std::mem::transmute::<_, RealFn>(ptr)(preparsed_data, caps))
+        .map(|ptr| fn_from_const::<RealFn>(ptr)(preparsed_data, caps))
         .unwrap_or(-1)
 }

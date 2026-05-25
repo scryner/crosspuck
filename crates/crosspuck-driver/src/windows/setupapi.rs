@@ -1,5 +1,6 @@
 use super::hidd::HID_INTERFACE_GUID;
 use super::log::debug_line;
+use super::proc::fn_from_mut;
 use super::state;
 use crosspuck_core::guest_driver::{VirtualHidProfile, VirtualHidProfileCatalog};
 use std::ffi::c_void;
@@ -157,67 +158,67 @@ static VIRTUAL_DEVINSTS: OnceLock<Mutex<Vec<(u32, VirtualHidProfile)>>> = OnceLo
 
 pub fn set_original_setupdi_get_class_devs_w(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_GET_CLASS_DEVS_W
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiGetClassDevsW trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_get_class_devs_a(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_GET_CLASS_DEVS_A
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiGetClassDevsA trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_enum_device_interfaces(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_ENUM_DEVICE_INTERFACES
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiEnumDeviceInterfaces trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_get_device_interface_detail_w(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_W
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiGetDeviceInterfaceDetailW trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_get_device_interface_detail_a(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_A
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiGetDeviceInterfaceDetailA trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_enum_device_info(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_ENUM_DEVICE_INFO
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiEnumDeviceInfo trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_get_device_registry_property_w(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_GET_DEVICE_REGISTRY_PROPERTY_W
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiGetDeviceRegistryPropertyW trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_get_device_registry_property_a(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_GET_DEVICE_REGISTRY_PROPERTY_A
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiGetDeviceRegistryPropertyA trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_get_device_instance_id_w(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_GET_DEVICE_INSTANCE_ID_W
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiGetDeviceInstanceIdW trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_get_device_instance_id_a(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_GET_DEVICE_INSTANCE_ID_A
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiGetDeviceInstanceIdA trampoline already initialized".to_string())
 }
 
 pub fn set_original_setupdi_get_device_property_w(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SETUPDI_GET_DEVICE_PROPERTY_W
-        .set(unsafe { mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SetupDiGetDevicePropertyW trampoline already initialized".to_string())
 }
 

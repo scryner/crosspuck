@@ -1,6 +1,7 @@
 use super::buffers::{input_slice, output_slice, report_id_from_buffer};
 use super::handles::{handle_for_profile, profile_for_handle};
-use super::log::debug_line;
+use super::log::{debug_line, error_line, trace_line};
+use super::proc::fn_from_mut;
 use super::state;
 use crosspuck_core::guest_driver::{
     path_may_be_virtual, VirtualHandleId, VirtualHidProfile, VirtualHidProfileCatalog,
@@ -114,61 +115,61 @@ pub fn log_optional_hook_error(module: &str, proc_name: &str, error: &str) {
 
 pub fn set_original_sdl_hid_close(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_CLOSE
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_close trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_enumerate(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_ENUMERATE
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_enumerate trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_free_enumeration(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_FREE_ENUMERATION
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_free_enumeration trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_open_path(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_OPEN_PATH
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_open_path trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_set_nonblocking(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_SET_NONBLOCKING
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_set_nonblocking trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_read(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_READ
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_read trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_read_timeout(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_READ_TIMEOUT
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_read_timeout trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_write(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_WRITE
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_write trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_get_feature_report(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_GET_FEATURE_REPORT
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_get_feature_report trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_send_feature_report(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_SEND_FEATURE_REPORT
-        .set(unsafe { std::mem::transmute(ptr) })
+        .set(unsafe { fn_from_mut(ptr) })
         .map_err(|_| "SDL_hid_send_feature_report trampoline already initialized".to_string())
 }
 
@@ -584,7 +585,7 @@ unsafe fn open_synthetic_path(path: &str) -> Option<*mut c_void> {
     match runtime.open_profile(profile) {
         Ok(handle_id) => {
             remember_sdl_profile(profile, handle_id);
-            let device = handle_for_profile(profile) as *mut c_void;
+            let device = handle_for_profile(profile);
             debug_line(&format!(
                 "[crosspuck] SDL_hid_open_path virtual profile={} device={device:p} path={path:?}",
                 profile.label()
@@ -592,7 +593,7 @@ unsafe fn open_synthetic_path(path: &str) -> Option<*mut c_void> {
             Some(device)
         }
         Err(error) => {
-            debug_line(&format!(
+            error_line(&format!(
                 "[crosspuck] SDL_hid_open_path failed path={path:?} profile={} error={error}",
                 profile.label()
             ));
@@ -738,7 +739,7 @@ fn log_sdl_failure(profile: VirtualHidProfile, operation: &'static str, error: &
     let error = error.to_string();
     let logs = SDL_FAILURE_LOGS.get_or_init(|| Mutex::new(Vec::new()));
     let Ok(mut logs) = logs.lock() else {
-        debug_line(&format!(
+        error_line(&format!(
             "[crosspuck] {operation} failed profile={} error={error}",
             profile.label()
         ));
@@ -755,7 +756,7 @@ fn log_sdl_failure(profile: VirtualHidProfile, operation: &'static str, error: &
             last: now,
             suppressed: 0,
         });
-        debug_line(&format!(
+        error_line(&format!(
             "[crosspuck] {operation} failed profile={} error={error}",
             profile.label()
         ));
@@ -771,12 +772,12 @@ fn log_sdl_failure(profile: VirtualHidProfile, operation: &'static str, error: &
     entry.last = now;
     entry.suppressed = 0;
     if suppressed == 0 {
-        debug_line(&format!(
+        error_line(&format!(
             "[crosspuck] {operation} failed profile={} error={error}",
             profile.label()
         ));
     } else {
-        debug_line(&format!(
+        error_line(&format!(
             "[crosspuck] {operation} failed profile={} error={error} suppressed={suppressed}",
             profile.label()
         ));
@@ -897,7 +898,7 @@ fn trace_virtual_payload(profile: VirtualHidProfile, operation: &str, payload: &
         return;
     };
     if let Some(rendered) = runtime.trace_payload(payload) {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} profile={} len={} payload={rendered}",
             profile.label(),
             payload.len()

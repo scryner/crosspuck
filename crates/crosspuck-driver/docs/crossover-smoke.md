@@ -54,6 +54,7 @@ Optional flags:
 tools/crossover/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
+  --log-level trace \
   --trace 1 \
   --required 1
 ```
@@ -79,6 +80,7 @@ safe built-in defaults when the registry/env values are missing:
 ```text
 CROSSPUCK_HOST_BRIDGE=1
 CROSSPUCK_HOST_BRIDGE_REQUIRED=1
+CROSSPUCK_LOG_LEVEL=info
 CROSSPUCK_TRACE_REPORTS=1
 CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS=1000
 CROSSPUCK_HOST_BRIDGE_HANDSHAKE_TIMEOUT_MS=2000
@@ -111,8 +113,12 @@ The registry file also sets:
 ```text
 CROSSPUCK_HOST_BRIDGE=1
 CROSSPUCK_HOST_BRIDGE_REQUIRED=1
+CROSSPUCK_LOG_LEVEL=info
 CROSSPUCK_TRACE_REPORTS=1
 ```
+
+Set `CROSSPUCK_LOG_LEVEL=debug` for hook/discovery diagnostics, or
+`CROSSPUCK_LOG_LEVEL=trace` with `CROSSPUCK_TRACE_REPORTS=1` for payload traces.
 
 One practical CrossOver path:
 
@@ -144,10 +150,12 @@ from the CrossOver Steam bottle.
 Expected early log markers:
 
 ```text
-[crosspuck] hook install ok
 [crosspuck] crosspuck-driver attached host_bridge=true required=true trace=true
 [crosspuck] startup bridge connect skipped: lazy connect enabled
 ```
+
+`hook install ok` and API-level discovery lines are debug-level logs. They are
+only expected when `CROSSPUCK_LOG_LEVEL=debug` or `trace`.
 
 The host bridge connects lazily when Steam first performs HID discovery or opens
 one of the synthetic paths:
@@ -208,7 +216,7 @@ marker was not observed. Common warning causes:
 Minimum pass:
 
 - The driver log contains `crosspuck-driver attached`.
-- The driver log contains `hook install ok`.
+- At debug or trace log level, the driver log contains `hook install ok`.
 - The bridge eventually logs `lazy bridge connect ok` or later trace proves
   host-backed HID calls are occurring.
 - Steam does not crash during discovery.
