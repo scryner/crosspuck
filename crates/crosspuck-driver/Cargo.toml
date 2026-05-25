@@ -1,0 +1,24 @@
+[package]
+name = "crosspuck-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CrossPuck guest hid.dll user-mode driver for CrossOver"
+
+[lib]
+name = "hid"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crosspuck-core = { path = "../crosspuck-core", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+min_hook_rs = "2.2"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+] }
