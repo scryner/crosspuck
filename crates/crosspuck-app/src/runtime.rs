@@ -1,18 +1,22 @@
-use crate::hid_backend::{HostBackend, HostHidError, RealHostBackend};
+use crate::hid_backend::{
+    set_host_log_session_trace_id, HostBackend, HostHidError, RealHostBackend,
+};
 use crosspuck_core::hid::{snapshot_for_filter, HidFilter};
 use crosspuck_core::protocol::{
-    Frame, FrameIoError, GetFeature, Hello, HelloOk, IdentityPayload, InputAttach, InputAttachOk,
-    InputReport, MessageType, ProtocolError, SetFeature, SetOutput, StatusCode, WireDecode,
-    WirePayload, WriteReport, CONTROL_PAYLOAD_LIMIT, INPUT_PAYLOAD_LIMIT, PROTOCOL_VERSION,
+    session_trace_label, Frame, FrameIoError, GetFeature, Hello, HelloOk, IdentityPayload,
+    InputAttach, InputAttachOk, InputReport, MessageType, ProtocolError, SetFeature, SetOutput,
+    StatusCode, WireDecode, WirePayload, WriteReport, CONTROL_PAYLOAD_LIMIT, INPUT_PAYLOAD_LIMIT,
+    PROTOCOL_VERSION,
 };
 use crosspuck_core::transport::{
     ChannelStream, TransportAddrs, TransportError, TransportListeners,
 };
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const INPUT_ATTACH_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -29,6 +33,7 @@ pub enum HostRuntimeState {
     },
     GuestConnected {
         session_id: u32,
+        session_trace_id: u32,
         serial: String,
         guest_pid: u32,
     },
@@ -57,12 +62,16 @@ impl HostRuntimeState {
             }
             Self::GuestConnected {
                 session_id,
+                session_trace_id,
                 serial,
                 guest_pid,
             } => MenuView::new(
                 "Guest proxy 연결됨",
                 serial.as_str(),
-                &format!("pid={guest_pid}, session={session_id}"),
+                &format!(
+                    "pid={guest_pid}, session={}, id={session_id}",
+                    session_trace_label(*session_trace_id)
+                ),
                 "-",
             ),
             Self::Degraded { reason } => MenuView::new("오류", "-", "-", reason.as_str()),
@@ -232,8 +241,16 @@ fn run_accept_loop(listeners: &TransportListeners, app_state: &AppState, stop: &
         let _ = control.set_write_timeout(Some(Duration::from_millis(250)));
 
         let session_id = next_session_id;
+        let session_trace_id = new_session_trace_id();
         next_session_id = next_session_id.wrapping_add(1).max(1);
-        match handle_session(listeners, &mut control, session_id, app_state, stop) {
+        match handle_session(
+            listeners,
+            &mut control,
+            session_id,
+            session_trace_id,
+            app_state,
+            stop,
+        ) {
             Ok(()) => {}
             Err(RuntimeError::DeviceUnavailable(_)) => {
                 app_state.set(HostRuntimeState::PuckDisconnected);
@@ -264,6 +281,7 @@ fn handle_session(
     listeners: &TransportListeners,
     control: &mut ChannelStream,
     session_id: u32,
+    session_trace_id: u32,
     app_state: &AppState,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), RuntimeError> {
@@ -276,7 +294,8 @@ fn handle_session(
     }
     let hello = Hello::decode(&hello_frame.payload)?;
     if hello.guest_protocol_version != PROTOCOL_VERSION as u16 {
-        let hello_ok = hello_ok_with_status(StatusCode::ProtocolError, session_id, 0);
+        let hello_ok =
+            hello_ok_with_status(StatusCode::ProtocolError, session_id, session_trace_id, 0);
         write_payload(control, hello_frame.header.id, &hello_ok)?;
         return Err(RuntimeError::ProtocolVersionMismatch(
             hello.guest_protocol_version,
@@ -287,7 +306,12 @@ fn handle_session(
         Ok(snapshot) => snapshot,
         Err(error) => {
             app_state.set(HostRuntimeState::PuckDisconnected);
-            let hello_ok = hello_ok_with_status(StatusCode::DeviceDisconnected, session_id, 0);
+            let hello_ok = hello_ok_with_status(
+                StatusCode::DeviceDisconnected,
+                session_id,
+                session_trace_id,
+                0,
+            );
             write_payload(control, hello_frame.header.id, &hello_ok)?;
             return Err(RuntimeError::DeviceUnavailable(error.to_string()));
         }
@@ -299,6 +323,7 @@ fn handle_session(
         control,
         SessionStart {
             session_id,
+            session_trace_id,
             hello_request_id: hello_frame.header.id,
             guest_pid: hello.guest_pid,
         },
@@ -311,6 +336,7 @@ fn handle_session(
 #[derive(Clone, Copy, Debug)]
 struct SessionStart {
     session_id: u32,
+    session_trace_id: u32,
     hello_request_id: u32,
     guest_pid: u32,
 }
@@ -351,7 +377,11 @@ fn handle_session_with_backend_timeout(
     write_payload(
         control,
         session.hello_request_id,
-        &HelloOk::success(session.session_id, identity.default_input_report_len()),
+        &HelloOk::success_with_trace(
+            session.session_id,
+            session.session_trace_id,
+            identity.default_input_report_len(),
+        ),
     )?;
     write_payload(control, 0, &identity)?;
 
@@ -389,16 +419,20 @@ fn handle_session_with_backend_timeout(
 
     app_state.set(HostRuntimeState::GuestConnected {
         session_id: session.session_id,
+        session_trace_id: session.session_trace_id,
         serial: identity.serial.clone(),
         guest_pid: session.guest_pid,
     });
+    set_host_log_session_trace_id(Some(session.session_trace_id));
 
     let input_running = Arc::new(AtomicBool::new(true));
     let input_thread = spawn_input_stream(input, Arc::clone(&backend), Arc::clone(&input_running))?;
-    let control_result = run_control_loop(control, backend.as_ref(), stop);
+    let control_result =
+        run_control_loop(control, backend.as_ref(), session.session_trace_id, stop);
     input_running.store(false, Ordering::Relaxed);
     let _ = input_thread.join();
     backend.cleanup_feedback();
+    set_host_log_session_trace_id(None);
     app_state.set(HostRuntimeState::PuckConnected {
         serial: identity.serial,
     });
@@ -408,8 +442,10 @@ fn handle_session_with_backend_timeout(
 fn run_control_loop(
     control: &mut ChannelStream,
     backend: &dyn HostBackend,
+    session_trace_id: u32,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), RuntimeError> {
+    let session_trace = session_trace_label(session_trace_id);
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
@@ -425,46 +461,54 @@ fn run_control_loop(
             MessageType::GetFeature => {
                 let request = GetFeature::decode(&frame.payload)?;
                 let result = backend.get_feature(&request);
-                eprintln!(
-                    "CrossPuck GET_FEATURE id={} interface={} report_id=0x{:02X} status={}",
-                    frame.header.id, request.interface_number, request.report_id, result.status
-                );
+                if !result.status.is_ok() {
+                    eprintln!(
+                        "CrossPuck[{session_trace}] GET_FEATURE id={} interface={} report_id=0x{:02X} status={}",
+                        frame.header.id, request.interface_number, request.report_id, result.status
+                    );
+                }
                 write_payload(control, frame.header.id, &result)?;
             }
             MessageType::SetFeature => {
                 let request = SetFeature::decode(&frame.payload)?;
                 let result = backend.set_feature(&request);
-                eprintln!(
-                    "CrossPuck SET_FEATURE id={} interface={} len={} status={}",
-                    frame.header.id,
-                    request.interface_number,
-                    request.data.len(),
-                    result.status
-                );
+                if !result.status.is_ok() {
+                    eprintln!(
+                        "CrossPuck[{session_trace}] SET_FEATURE id={} interface={} len={} status={}",
+                        frame.header.id,
+                        request.interface_number,
+                        request.data.len(),
+                        result.status
+                    );
+                }
                 write_payload(control, frame.header.id, &result)?;
             }
             MessageType::SetOutput => {
                 let request = SetOutput::decode(&frame.payload)?;
                 let result = backend.set_output(&request);
-                eprintln!(
-                    "CrossPuck SET_OUTPUT id={} interface={} len={} status={}",
-                    frame.header.id,
-                    request.interface_number,
-                    request.data.len(),
-                    result.status
-                );
+                if !result.status.is_ok() {
+                    eprintln!(
+                        "CrossPuck[{session_trace}] SET_OUTPUT id={} interface={} len={} status={}",
+                        frame.header.id,
+                        request.interface_number,
+                        request.data.len(),
+                        result.status
+                    );
+                }
                 write_payload(control, frame.header.id, &result)?;
             }
             MessageType::Write => {
                 let request = WriteReport::decode(&frame.payload)?;
                 let result = backend.write_report(&request);
-                eprintln!(
-                    "CrossPuck WRITE id={} interface={} len={} status={}",
-                    frame.header.id,
-                    request.interface_number,
-                    request.data.len(),
-                    result.status
-                );
+                if !result.status.is_ok() {
+                    eprintln!(
+                        "CrossPuck[{session_trace}] WRITE id={} interface={} len={} status={}",
+                        frame.header.id,
+                        request.interface_number,
+                        request.data.len(),
+                        result.status
+                    );
+                }
                 write_payload(control, frame.header.id, &result)?;
             }
             actual => {
@@ -540,13 +584,22 @@ fn sleep_until_stop(stop: &Arc<AtomicBool>, duration: Duration) {
     }
 }
 
+fn new_session_trace_id() -> u32 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = Sha256::new();
+    hasher.update(now.to_string().as_bytes());
+    let digest = hasher.finalize();
+    ((u32::from(digest[0])) << 12) | ((u32::from(digest[1])) << 4) | (u32::from(digest[2]) >> 4)
+}
+
 fn spawn_input_stream(
     mut input: ChannelStream,
     backend: Arc<dyn HostBackend>,
     running: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, RuntimeError> {
-    let descriptor = backend.input_descriptor()?;
-
     Ok(thread::spawn(move || {
         let Ok(mut reader) = backend.open_input_reader() else {
             return;
@@ -557,13 +610,13 @@ fn spawn_input_stream(
         while running.load(Ordering::Relaxed) {
             match reader.read_report(Duration::from_millis(10)) {
                 Ok(None) => {}
-                Ok(Some(data)) => {
+                Ok(Some(input_report)) => {
                     let report = InputReport {
-                        interface_number: descriptor.interface_number,
-                        role: descriptor.role,
+                        interface_number: input_report.descriptor.interface_number,
+                        role: input_report.descriptor.role,
                         host_monotonic_us: start.elapsed().as_micros().min(u128::from(u64::MAX))
                             as u64,
-                        data,
+                        data: input_report.data,
                     };
                     if write_payload(&mut input, sequence, &report).is_err() {
                         break;
@@ -579,12 +632,14 @@ fn spawn_input_stream(
 fn hello_ok_with_status(
     status: StatusCode,
     session_id: u32,
+    session_trace_id: u32,
     default_input_report_len: u16,
 ) -> HelloOk {
     HelloOk {
         status,
         protocol_version: PROTOCOL_VERSION as u16,
         session_id,
+        session_trace_id,
         control_payload_limit: CONTROL_PAYLOAD_LIMIT as u16,
         input_payload_limit: INPUT_PAYLOAD_LIMIT as u16,
         default_input_report_len,
@@ -683,7 +738,7 @@ impl From<HostHidError> for RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hid_backend::{HostBackend, InputDescriptor, InputReportReader};
+    use crate::hid_backend::{HostBackend, HostInputReport, InputDescriptor, InputReportReader};
     use crosspuck_core::guest::{GuestTransportClient, GuestTransportConfig};
     use crosspuck_core::protocol::{
         Channel, CollectionDescriptor, CollectionRole, FeatureResult, IdentityPayload,
@@ -729,13 +784,6 @@ mod tests {
     impl HostBackend for FakeBackend {
         fn identity(&self) -> &IdentityPayload {
             &self.identity
-        }
-
-        fn input_descriptor(&self) -> Result<InputDescriptor, HostHidError> {
-            Ok(InputDescriptor {
-                interface_number: 2,
-                role: CollectionRole::PuckMain,
-            })
         }
 
         fn open_input_reader(&self) -> Result<Box<dyn InputReportReader>, HostHidError> {
@@ -793,8 +841,22 @@ mod tests {
     }
 
     impl InputReportReader for FakeInputReader {
-        fn read_report(&mut self, _timeout: Duration) -> Result<Option<Vec<u8>>, HostHidError> {
-            Ok(self.reports.lock().unwrap().pop_front())
+        fn read_report(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<Option<HostInputReport>, HostHidError> {
+            Ok(self
+                .reports
+                .lock()
+                .unwrap()
+                .pop_front()
+                .map(|data| HostInputReport {
+                    descriptor: InputDescriptor {
+                        interface_number: 2,
+                        role: CollectionRole::PuckMain,
+                    },
+                    data,
+                }))
         }
     }
 
@@ -817,6 +879,7 @@ mod tests {
                 &mut control,
                 SessionStart {
                     session_id: 1,
+                    session_trace_id: 0x12345,
                     hello_request_id: hello.header.id,
                     guest_pid: 1234,
                 },
@@ -836,6 +899,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(guest.identity().serial, "FXB9961303C9C");
+        assert_eq!(guest.session_trace_id(), 0x12345);
         assert_eq!(guest.read_input_report().unwrap().data, vec![0x79, 0x02]);
         assert_eq!(
             guest.get_feature(2, 0x02, 64, 100).unwrap().data,
@@ -897,6 +961,7 @@ mod tests {
                     &mut control,
                     SessionStart {
                         session_id,
+                        session_trace_id: 0x12345 + session_id,
                         hello_request_id: hello.header.id,
                         guest_pid: 1234,
                     },
@@ -942,6 +1007,7 @@ mod tests {
                 &mut control,
                 SessionStart {
                     session_id: 1,
+                    session_trace_id: 0x12345,
                     hello_request_id: hello.header.id,
                     guest_pid: 1234,
                 },
@@ -1001,6 +1067,7 @@ mod tests {
                 &mut control,
                 SessionStart {
                     session_id: 1,
+                    session_trace_id: 0x12345,
                     hello_request_id: hello.header.id,
                     guest_pid: 1234,
                 },
@@ -1043,8 +1110,14 @@ mod tests {
         let server = thread::spawn(move || {
             ready_tx.send(()).unwrap();
             let mut control = listeners.accept_control().unwrap();
-            let result =
-                handle_session(&listeners, &mut control, 1, &AppState::new(), &server_stop);
+            let result = handle_session(
+                &listeners,
+                &mut control,
+                1,
+                0x12345,
+                &AppState::new(),
+                &server_stop,
+            );
             result_tx
                 .send(matches!(
                     result,

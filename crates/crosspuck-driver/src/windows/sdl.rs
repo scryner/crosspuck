@@ -6,6 +6,7 @@ use crosspuck_core::guest_driver::{
     path_may_be_virtual, VirtualHandleId, VirtualHidProfile, VirtualHidProfileCatalog,
 };
 use std::ffi::{c_char, c_int, c_void, CString};
+use std::fmt;
 use std::ptr;
 use std::slice;
 use std::sync::{Mutex, OnceLock};
@@ -18,6 +19,8 @@ type SdlHidCloseFn = unsafe extern "C" fn(*mut c_void);
 type SdlHidEnumerateFn = unsafe extern "C" fn(u16, u16) -> *mut SdlHidDeviceInfo;
 type SdlHidFreeEnumerationFn = unsafe extern "C" fn(*mut SdlHidDeviceInfo);
 type SdlHidOpenPathFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+type SdlHidSetNonblockingFn = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
+type SdlHidReadFn = unsafe extern "C" fn(*mut c_void, *mut u8, usize) -> c_int;
 type SdlHidReadTimeoutFn = unsafe extern "C" fn(*mut c_void, *mut u8, usize, c_int) -> c_int;
 type SdlHidWriteFn = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> c_int;
 type SdlHidGetFeatureReportFn = unsafe extern "C" fn(*mut c_void, *mut u8, usize) -> c_int;
@@ -27,6 +30,8 @@ static ORIGINAL_SDL_HID_CLOSE: OnceLock<SdlHidCloseFn> = OnceLock::new();
 static ORIGINAL_SDL_HID_ENUMERATE: OnceLock<SdlHidEnumerateFn> = OnceLock::new();
 static ORIGINAL_SDL_HID_FREE_ENUMERATION: OnceLock<SdlHidFreeEnumerationFn> = OnceLock::new();
 static ORIGINAL_SDL_HID_OPEN_PATH: OnceLock<SdlHidOpenPathFn> = OnceLock::new();
+static ORIGINAL_SDL_HID_SET_NONBLOCKING: OnceLock<SdlHidSetNonblockingFn> = OnceLock::new();
+static ORIGINAL_SDL_HID_READ: OnceLock<SdlHidReadFn> = OnceLock::new();
 static ORIGINAL_SDL_HID_READ_TIMEOUT: OnceLock<SdlHidReadTimeoutFn> = OnceLock::new();
 static ORIGINAL_SDL_HID_WRITE: OnceLock<SdlHidWriteFn> = OnceLock::new();
 static ORIGINAL_SDL_HID_GET_FEATURE_REPORT: OnceLock<SdlHidGetFeatureReportFn> = OnceLock::new();
@@ -34,6 +39,36 @@ static ORIGINAL_SDL_HID_SEND_FEATURE_REPORT: OnceLock<SdlHidSendFeatureReportFn>
 static SDL_AUGMENTED_ENUMERATIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 static SDL_OPEN_SENTINELS: OnceLock<Mutex<Vec<(VirtualHidProfile, VirtualHandleId)>>> =
     OnceLock::new();
+static SDL_FAILURE_LOGS: OnceLock<Mutex<Vec<SdlFailureLog>>> = OnceLock::new();
+static SDL_SUCCESS_LOGS: OnceLock<Mutex<Vec<SdlSuccessLog>>> = OnceLock::new();
+static SDL_READ_LOGS: OnceLock<Mutex<Vec<SdlReadLog>>> = OnceLock::new();
+
+const SDL_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(2);
+const SDL_SUCCESS_LOG_INTERVAL: Duration = Duration::from_secs(2);
+const SDL_READ_LOG_INTERVAL: Duration = Duration::from_secs(2);
+const SDL_VIRTUAL_BLOCKING_READ_MAX: Duration = Duration::from_millis(50);
+
+struct SdlFailureLog {
+    operation: &'static str,
+    profile: VirtualHidProfile,
+    error: String,
+    last: Instant,
+    suppressed: u32,
+}
+
+struct SdlSuccessLog {
+    operation: &'static str,
+    profile: VirtualHidProfile,
+    detail: String,
+    last: Instant,
+    suppressed: u32,
+}
+
+struct SdlReadLog {
+    profile: VirtualHidProfile,
+    last: Instant,
+    suppressed: u32,
+}
 
 #[repr(C)]
 pub struct SdlHidDeviceInfo {
@@ -99,6 +134,18 @@ pub fn set_original_sdl_hid_open_path(ptr: *mut c_void) -> Result<(), String> {
     ORIGINAL_SDL_HID_OPEN_PATH
         .set(unsafe { std::mem::transmute(ptr) })
         .map_err(|_| "SDL_hid_open_path trampoline already initialized".to_string())
+}
+
+pub fn set_original_sdl_hid_set_nonblocking(ptr: *mut c_void) -> Result<(), String> {
+    ORIGINAL_SDL_HID_SET_NONBLOCKING
+        .set(unsafe { std::mem::transmute(ptr) })
+        .map_err(|_| "SDL_hid_set_nonblocking trampoline already initialized".to_string())
+}
+
+pub fn set_original_sdl_hid_read(ptr: *mut c_void) -> Result<(), String> {
+    ORIGINAL_SDL_HID_READ
+        .set(unsafe { std::mem::transmute(ptr) })
+        .map_err(|_| "SDL_hid_read trampoline already initialized".to_string())
 }
 
 pub fn set_original_sdl_hid_read_timeout(ptr: *mut c_void) -> Result<(), String> {
@@ -190,6 +237,40 @@ pub unsafe extern "C" fn detoured_sdl_hid_open_path(path: *const c_char) -> *mut
         .map_or(ptr::null_mut(), |original| original(path))
 }
 
+pub unsafe extern "C" fn detoured_sdl_hid_set_nonblocking(
+    device: *mut c_void,
+    nonblock: c_int,
+) -> c_int {
+    let Some(profile) = profile_for_sdl_device(device) else {
+        return ORIGINAL_SDL_HID_SET_NONBLOCKING
+            .get()
+            .copied()
+            .map_or(-1, |original| original(device, nonblock));
+    };
+
+    log_sdl_success(
+        profile,
+        "SDL_hid_set_nonblocking",
+        &format_args!("nonblock={nonblock}"),
+    );
+    0
+}
+
+pub unsafe extern "C" fn detoured_sdl_hid_read(
+    device: *mut c_void,
+    data: *mut u8,
+    len: usize,
+) -> c_int {
+    let Some(profile) = profile_for_sdl_device(device) else {
+        return ORIGINAL_SDL_HID_READ
+            .get()
+            .copied()
+            .map_or(-1, |original| original(device, data, len));
+    };
+
+    detoured_sdl_hid_read_common(profile, data, len, "SDL_hid_read", None)
+}
+
 pub unsafe extern "C" fn detoured_sdl_hid_read_timeout(
     device: *mut c_void,
     data: *mut u8,
@@ -203,6 +284,22 @@ pub unsafe extern "C" fn detoured_sdl_hid_read_timeout(
             .map_or(-1, |original| original(device, data, len, milliseconds));
     };
 
+    detoured_sdl_hid_read_common(
+        profile,
+        data,
+        len,
+        "SDL_hid_read_timeout",
+        Some(milliseconds),
+    )
+}
+
+unsafe fn detoured_sdl_hid_read_common(
+    profile: VirtualHidProfile,
+    data: *mut u8,
+    len: usize,
+    operation: &'static str,
+    milliseconds: Option<c_int>,
+) -> c_int {
     let Some(buffer_len) = len_to_u32(len) else {
         return -1;
     };
@@ -210,24 +307,19 @@ pub unsafe extern "C" fn detoured_sdl_hid_read_timeout(
         return -1;
     };
 
-    let deadline = if milliseconds < 0 {
-        None
-    } else {
-        Some(Instant::now() + Duration::from_millis(milliseconds as u64))
+    let timeout = milliseconds.unwrap_or(-1);
+    let deadline = match milliseconds {
+        Some(0) => Some(Instant::now()),
+        Some(value) if value > 0 => Some(Instant::now() + Duration::from_millis(value as u64)),
+        _ => Some(Instant::now() + SDL_VIRTUAL_BLOCKING_READ_MAX),
     };
     loop {
-        match read_sdl_report(profile, output) {
+        match read_sdl_report(profile, output, operation) {
             Ok(Some(count)) => {
-                trace_virtual_payload(profile, "SDL_hid_read_timeout", &output[..count]);
-                debug_line(&format!(
-                    "[crosspuck] SDL_hid_read_timeout virtual profile={} timeout={} requested={} returned={count}",
-                    profile.label(),
-                    milliseconds,
-                    len
-                ));
+                log_sdl_read_success(profile, operation, timeout, len, count);
                 return count_to_c_int(count);
             }
-            Ok(None) if milliseconds == 0 => {
+            Ok(None) if timeout == 0 => {
                 return 0;
             }
             Ok(None) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
@@ -263,18 +355,15 @@ pub unsafe extern "C" fn detoured_sdl_hid_write(
     match runtime.write_report(profile, payload) {
         Ok(count) => {
             trace_virtual_payload(profile, "SDL_hid_write", payload);
-            debug_line(&format!(
-                "[crosspuck] SDL_hid_write virtual profile={} requested={} accepted={count}",
-                profile.label(),
-                payload.len()
-            ));
+            log_sdl_success(
+                profile,
+                "SDL_hid_write",
+                &format_args!("requested={} accepted={count}", payload.len()),
+            );
             count_to_c_int(usize::from(count))
         }
         Err(error) => {
-            debug_line(&format!(
-                "[crosspuck] SDL_hid_write failed profile={} error={error}",
-                profile.label()
-            ));
+            log_sdl_failure(profile, "SDL_hid_write", &error);
             -1
         }
     }
@@ -305,18 +394,22 @@ pub unsafe extern "C" fn detoured_sdl_hid_get_feature_report(
     match runtime.copy_feature_report(profile, report_id, output) {
         Ok(count) => {
             trace_virtual_payload(profile, "SDL_hid_get_feature_report", &output[..count]);
-            debug_line(&format!(
-                "[crosspuck] SDL_hid_get_feature_report virtual profile={} report_id=0x{report_id:02X} requested={} returned={count}",
-                profile.label(),
-                len
-            ));
+            log_sdl_success(
+                profile,
+                "SDL_hid_get_feature_report",
+                &format_args!(
+                    "report_id=0x{report_id:02X} requested={} returned={count}",
+                    len
+                ),
+            );
             count_to_c_int(count)
         }
         Err(error) => {
-            debug_line(&format!(
-                "[crosspuck] SDL_hid_get_feature_report failed profile={} report_id=0x{report_id:02X} error={error}",
-                profile.label()
-            ));
+            log_sdl_failure(
+                profile,
+                "SDL_hid_get_feature_report",
+                &format_args!("report_id=0x{report_id:02X} {error}"),
+            );
             -1
         }
     }
@@ -346,18 +439,15 @@ pub unsafe extern "C" fn detoured_sdl_hid_send_feature_report(
     match runtime.set_feature(profile, payload) {
         Ok(count) => {
             trace_virtual_payload(profile, "SDL_hid_send_feature_report", payload);
-            debug_line(&format!(
-                "[crosspuck] SDL_hid_send_feature_report virtual profile={} requested={} accepted={count}",
-                profile.label(),
-                payload.len()
-            ));
+            log_sdl_success(
+                profile,
+                "SDL_hid_send_feature_report",
+                &format_args!("requested={} accepted={count}", payload.len()),
+            );
             count_to_c_int(usize::from(count))
         }
         Err(error) => {
-            debug_line(&format!(
-                "[crosspuck] SDL_hid_send_feature_report failed profile={} error={error}",
-                profile.label()
-            ));
+            log_sdl_failure(profile, "SDL_hid_send_feature_report", &error);
             -1
         }
     }
@@ -571,17 +661,18 @@ fn sdl_query_matches_catalog(
             || product_id == 0x0002)
 }
 
-fn read_sdl_report(profile: VirtualHidProfile, output: &mut [u8]) -> Result<Option<usize>, ()> {
+fn read_sdl_report(
+    profile: VirtualHidProfile,
+    output: &mut [u8],
+    operation: &'static str,
+) -> Result<Option<usize>, ()> {
     let Some(runtime) = state::runtime() else {
         return Err(());
     };
     match runtime.copy_next_input_report(profile, output) {
         Ok(result) => Ok(result),
         Err(error) => {
-            debug_line(&format!(
-                "[crosspuck] SDL_hid_read_timeout failed profile={} error={error}",
-                profile.label()
-            ));
+            log_sdl_failure(profile, operation, &error);
             Err(())
         }
     }
@@ -640,6 +731,165 @@ fn len_to_u32(len: usize) -> Option<u32> {
 
 fn count_to_c_int(count: usize) -> c_int {
     count.min(c_int::MAX as usize) as c_int
+}
+
+fn log_sdl_failure(profile: VirtualHidProfile, operation: &'static str, error: &dyn fmt::Display) {
+    let now = Instant::now();
+    let error = error.to_string();
+    let logs = SDL_FAILURE_LOGS.get_or_init(|| Mutex::new(Vec::new()));
+    let Ok(mut logs) = logs.lock() else {
+        debug_line(&format!(
+            "[crosspuck] {operation} failed profile={} error={error}",
+            profile.label()
+        ));
+        return;
+    };
+
+    let Some(entry) = logs.iter_mut().find(|entry| {
+        entry.operation == operation && entry.profile == profile && entry.error == error
+    }) else {
+        logs.push(SdlFailureLog {
+            operation,
+            profile,
+            error: error.clone(),
+            last: now,
+            suppressed: 0,
+        });
+        debug_line(&format!(
+            "[crosspuck] {operation} failed profile={} error={error}",
+            profile.label()
+        ));
+        return;
+    };
+
+    if now.duration_since(entry.last) < SDL_FAILURE_LOG_INTERVAL {
+        entry.suppressed = entry.suppressed.saturating_add(1);
+        return;
+    }
+
+    let suppressed = entry.suppressed;
+    entry.last = now;
+    entry.suppressed = 0;
+    if suppressed == 0 {
+        debug_line(&format!(
+            "[crosspuck] {operation} failed profile={} error={error}",
+            profile.label()
+        ));
+    } else {
+        debug_line(&format!(
+            "[crosspuck] {operation} failed profile={} error={error} suppressed={suppressed}",
+            profile.label()
+        ));
+    }
+}
+
+fn log_sdl_success(profile: VirtualHidProfile, operation: &'static str, detail: &dyn fmt::Display) {
+    let now = Instant::now();
+    let detail = detail.to_string();
+    let logs = SDL_SUCCESS_LOGS.get_or_init(|| Mutex::new(Vec::new()));
+    let Ok(mut logs) = logs.lock() else {
+        debug_line(&format!(
+            "[crosspuck] {operation} virtual profile={} {detail}",
+            profile.label()
+        ));
+        return;
+    };
+
+    let Some(entry) = logs.iter_mut().find(|entry| {
+        entry.operation == operation && entry.profile == profile && entry.detail == detail
+    }) else {
+        logs.push(SdlSuccessLog {
+            operation,
+            profile,
+            detail: detail.clone(),
+            last: now,
+            suppressed: 0,
+        });
+        debug_line(&format!(
+            "[crosspuck] {operation} virtual profile={} {detail}",
+            profile.label()
+        ));
+        return;
+    };
+
+    if now.duration_since(entry.last) < SDL_SUCCESS_LOG_INTERVAL {
+        entry.suppressed = entry.suppressed.saturating_add(1);
+        return;
+    }
+
+    let suppressed = entry.suppressed;
+    entry.last = now;
+    entry.suppressed = 0;
+    if suppressed == 0 {
+        debug_line(&format!(
+            "[crosspuck] {operation} virtual profile={} {detail}",
+            profile.label()
+        ));
+    } else {
+        debug_line(&format!(
+            "[crosspuck] {operation} virtual profile={} {detail} suppressed={suppressed}",
+            profile.label()
+        ));
+    }
+}
+
+fn log_sdl_read_success(
+    profile: VirtualHidProfile,
+    operation: &'static str,
+    milliseconds: c_int,
+    requested: usize,
+    returned: usize,
+) {
+    let now = Instant::now();
+    let logs = SDL_READ_LOGS.get_or_init(|| Mutex::new(Vec::new()));
+    let Ok(mut logs) = logs.lock() else {
+        debug_line(&format!(
+            "[crosspuck] {operation} virtual profile={} timeout={} requested={} returned={returned}",
+            profile.label(),
+            milliseconds,
+            requested
+        ));
+        return;
+    };
+
+    let Some(entry) = logs.iter_mut().find(|entry| entry.profile == profile) else {
+        logs.push(SdlReadLog {
+            profile,
+            last: now,
+            suppressed: 0,
+        });
+        debug_line(&format!(
+            "[crosspuck] {operation} virtual profile={} timeout={} requested={} returned={returned}",
+            profile.label(),
+            milliseconds,
+            requested
+        ));
+        return;
+    };
+
+    if now.duration_since(entry.last) < SDL_READ_LOG_INTERVAL {
+        entry.suppressed = entry.suppressed.saturating_add(1);
+        return;
+    }
+
+    let suppressed = entry.suppressed;
+    entry.last = now;
+    entry.suppressed = 0;
+    if suppressed == 0 {
+        debug_line(&format!(
+            "[crosspuck] {operation} virtual profile={} timeout={} requested={} returned={returned}",
+            profile.label(),
+            milliseconds,
+            requested
+        ));
+    } else {
+        debug_line(&format!(
+            "[crosspuck] {operation} virtual profile={} timeout={} requested={} returned={returned} suppressed={suppressed}",
+            profile.label(),
+            milliseconds,
+            requested
+        ));
+    }
 }
 
 fn trace_virtual_payload(profile: VirtualHidProfile, operation: &str, payload: &[u8]) {

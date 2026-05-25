@@ -98,6 +98,7 @@ impl GuestTransportClient {
             decode_expected::<IdentityPayload>(&identity_frame),
         )?;
         let session_id = hello_ok.session_id;
+        let session_trace_id = hello_ok.session_trace_id;
 
         let mut input = at_stage(
             "input connect",
@@ -182,6 +183,7 @@ impl GuestTransportClient {
             info: GuestSessionInfo {
                 identity,
                 session_id,
+                session_trace_id,
                 guest_label: config.guest_label,
             },
             control: GuestControl {
@@ -207,6 +209,7 @@ fn at_stage<T>(stage: &'static str, result: Result<T, GuestError>) -> Result<T, 
 pub struct GuestSessionInfo {
     pub identity: IdentityPayload,
     pub session_id: u32,
+    pub session_trace_id: u32,
     pub guest_label: String,
 }
 
@@ -223,6 +226,10 @@ impl GuestSession {
 
     pub fn session_id(&self) -> u32 {
         self.info.session_id
+    }
+
+    pub fn session_trace_id(&self) -> u32 {
+        self.info.session_trace_id
     }
 
     pub fn guest_label(&self) -> &str {

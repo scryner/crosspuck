@@ -172,9 +172,21 @@ fn install_sdl_hooks() {
     );
     install_optional_hook(
         "SDL3.dll",
+        "SDL_hid_set_nonblocking",
+        sdl::detoured_sdl_hid_set_nonblocking as *mut c_void,
+        sdl::set_original_sdl_hid_set_nonblocking,
+    );
+    install_optional_hook(
+        "SDL3.dll",
         "SDL_hid_read_timeout",
         sdl::detoured_sdl_hid_read_timeout as *mut c_void,
         sdl::set_original_sdl_hid_read_timeout,
+    );
+    install_optional_hook(
+        "SDL3.dll",
+        "SDL_hid_read",
+        sdl::detoured_sdl_hid_read as *mut c_void,
+        sdl::set_original_sdl_hid_read,
     );
     install_optional_hook(
         "SDL3.dll",

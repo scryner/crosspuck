@@ -2,7 +2,7 @@ use crate::guest::{
     GuestControl, GuestError, GuestInput, GuestSessionInfo, GuestTransportClient,
     GuestTransportConfig,
 };
-use crate::protocol::{FeatureResult, QueuedInputReport, StatusCode};
+use crate::protocol::{CollectionRole, FeatureResult, QueuedInputReport, StatusCode};
 use crate::transport::TransportAddrs;
 use std::collections::VecDeque;
 use std::fmt;
@@ -14,6 +14,8 @@ use std::time::Duration;
 const DEFAULT_INPUT_QUEUE_CAPACITY: usize = 64;
 const DEFAULT_GUEST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_GUEST_IO_TIMEOUT: Duration = Duration::from_millis(50);
+const INPUT_PUMP_READ_TIMEOUT: Duration = Duration::from_millis(50);
+const PUCK_MAIN_INTERFACE: u8 = 2;
 
 #[derive(Clone, Debug)]
 pub struct HostBridgeConfig {
@@ -42,6 +44,7 @@ pub struct HostBridge {
     info: GuestSessionInfo,
     control: Mutex<GuestControl>,
     input_queue: Arc<Mutex<VecDeque<QueuedInputReport>>>,
+    input_routes: Arc<Mutex<InputRouteState>>,
     stats: Arc<Mutex<HostBridgeInputStats>>,
     running: Arc<AtomicBool>,
     input_thread: Mutex<Option<JoinHandle<()>>>,
@@ -55,6 +58,11 @@ pub struct HostBridgeInputStats {
     pub read_errors: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct InputRouteState {
+    preferred_wireless_interface: Option<u8>,
+}
+
 impl HostBridge {
     pub fn connect(config: HostBridgeConfig) -> Result<Self, HostBridgeError> {
         let session = GuestTransportClient::connect(GuestTransportConfig {
@@ -66,9 +74,13 @@ impl HostBridge {
             ..GuestTransportConfig::default()
         })?;
         let parts = session.into_parts();
+        parts
+            .input
+            .set_read_timeout(Some(INPUT_PUMP_READ_TIMEOUT))?;
         let input_queue = Arc::new(Mutex::new(VecDeque::with_capacity(
             config.input_queue_capacity,
         )));
+        let input_routes = Arc::new(Mutex::new(InputRouteState::default()));
         let stats = Arc::new(Mutex::new(HostBridgeInputStats::default()));
         let running = Arc::new(AtomicBool::new(true));
         let input_thread = spawn_input_pump(
@@ -83,6 +95,7 @@ impl HostBridge {
             info: parts.info,
             control: Mutex::new(parts.control),
             input_queue,
+            input_routes,
             stats,
             running,
             input_thread: Mutex::new(Some(input_thread)),
@@ -105,16 +118,26 @@ impl HostBridge {
             .input_queue
             .lock()
             .map_err(|_| HostBridgeError::QueuePoisoned)?;
-        let Some(index) = queue
-            .iter()
-            .position(|report| report.interface_number == interface_number)
+        let routes = self
+            .input_routes
+            .lock()
+            .map(|routes| *routes)
+            .unwrap_or_default();
+        let Some((index, routed_interface)) =
+            find_report_for_interface(&queue, interface_number, routes)
         else {
             return Ok(None);
         };
-        let report = queue.remove(index);
+        let mut report = queue.remove(index);
         drop(queue);
 
-        if report.is_some() {
+        if let Some(report) = report.as_mut() {
+            if let Some(routed_interface) = routed_interface {
+                report.interface_number = routed_interface;
+                if let Some(role) = wireless_role_for_interface(routed_interface) {
+                    report.role = role;
+                }
+            }
             self.with_stats(|stats| stats.popped += 1);
         }
         Ok(report)
@@ -147,6 +170,7 @@ impl HostBridge {
             .map_err(|_| HostBridgeError::ControlPoisoned)?;
         let result = control.get_feature(interface_number, report_id, requested_len, timeout_ms)?;
         ensure_status("GET_FEATURE", result.status, result.os_error)?;
+        self.update_input_routes_from_feature(interface_number, report_id, &result.data);
         Ok(result)
     }
 
@@ -217,6 +241,80 @@ impl HostBridge {
     fn with_stats(&self, update: impl FnOnce(&mut HostBridgeInputStats)) {
         if let Ok(mut stats) = self.stats.lock() {
             update(&mut stats);
+        }
+    }
+}
+
+fn find_report_for_interface(
+    queue: &VecDeque<QueuedInputReport>,
+    interface_number: u8,
+    routes: InputRouteState,
+) -> Option<(usize, Option<u8>)> {
+    let exact = queue.iter().position(|report| {
+        report.interface_number == interface_number
+            && !should_hold_main_report_for_wireless(report, interface_number, routes)
+    });
+    if let Some(index) = exact {
+        return Some((index, None));
+    }
+
+    if wireless_role_for_interface(interface_number).is_some()
+        && routes
+            .preferred_wireless_interface
+            .is_none_or(|preferred| preferred == interface_number)
+    {
+        let index = queue.iter().position(|report| {
+            report.interface_number == PUCK_MAIN_INTERFACE && is_triton_input_report(&report.data)
+        })?;
+        return Some((index, Some(interface_number)));
+    }
+
+    None
+}
+
+fn should_hold_main_report_for_wireless(
+    report: &QueuedInputReport,
+    requested_interface: u8,
+    routes: InputRouteState,
+) -> bool {
+    requested_interface == PUCK_MAIN_INTERFACE
+        && routes.preferred_wireless_interface.is_some()
+        && report.interface_number == PUCK_MAIN_INTERFACE
+        && is_triton_input_report(&report.data)
+}
+
+fn wireless_role_for_interface(interface_number: u8) -> Option<CollectionRole> {
+    match interface_number {
+        3 => Some(CollectionRole::PuckInterface3),
+        4 => Some(CollectionRole::PuckInterface4),
+        5 => Some(CollectionRole::PuckInterface5),
+        _ => None,
+    }
+}
+
+fn is_triton_input_report(data: &[u8]) -> bool {
+    matches!(
+        data.first().copied(),
+        Some(0x42 | 0x43 | 0x45 | 0x46 | 0x79)
+    )
+}
+
+impl HostBridge {
+    fn update_input_routes_from_feature(&self, interface_number: u8, report_id: u8, data: &[u8]) {
+        if report_id != 0x02
+            || data.get(1).copied() != Some(0xA3)
+            || wireless_role_for_interface(interface_number).is_none()
+        {
+            return;
+        }
+
+        let registered = data.iter().skip(3).any(|byte| *byte != 0);
+        if let Ok(mut routes) = self.input_routes.lock() {
+            if registered {
+                routes.preferred_wireless_interface = Some(interface_number);
+            } else if routes.preferred_wireless_interface == Some(interface_number) {
+                routes.preferred_wireless_interface = None;
+            }
         }
     }
 }
@@ -492,6 +590,103 @@ mod tests {
         );
         assert_eq!(bridge.set_feature(2, &[0x02, 0xA3, 0x00], 100).unwrap(), 3);
         assert_eq!(bridge.set_output(2, &[0x80, 0x00], 100).unwrap(), 2);
+
+        drop(bridge);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn bridge_routes_main_triton_reports_to_registered_wireless_interface() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = listeners.local_addrs().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut control = listeners.accept_control().unwrap();
+            control
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            control
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let hello = control.read_frame().unwrap();
+            assert_eq!(hello.header.message_type, MessageType::Hello);
+            write_payload(
+                &mut control,
+                hello.header.id,
+                &HelloOk::success(0xCAFE_BABE, 54),
+            );
+            write_payload(&mut control, 0, &identity());
+
+            let mut input = listeners.accept_input().unwrap();
+            input
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            input
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let attach = input.read_frame().unwrap();
+            assert_eq!(attach.header.message_type, MessageType::InputAttach);
+            write_payload(
+                &mut input,
+                attach.header.id,
+                &InputAttachOk {
+                    status: StatusCode::Ok,
+                    input_report_len: 54,
+                    first_input_seq: 1,
+                },
+            );
+            write_payload(
+                &mut input,
+                1,
+                &InputReport {
+                    interface_number: 2,
+                    role: CollectionRole::PuckMain,
+                    host_monotonic_us: 10,
+                    data: vec![0x45, 0x83, 0x00, 0x00],
+                },
+            );
+
+            let get_feature = control.read_frame().unwrap();
+            assert_eq!(get_feature.header.message_type, MessageType::GetFeature);
+            write_payload(
+                &mut control,
+                get_feature.header.id,
+                &FeatureResult {
+                    status: StatusCode::Ok,
+                    os_error: 0,
+                    data: vec![0x02, 0xA3, 0x18, 0xE5, 0xA0, b'F', b'X'],
+                },
+            );
+        });
+
+        ready_rx.recv().unwrap();
+        let bridge = HostBridge::connect(HostBridgeConfig {
+            addrs,
+            io_timeout: Duration::from_millis(10),
+            ..HostBridgeConfig::default()
+        })
+        .unwrap();
+
+        let mut feature = [0_u8; 64];
+        bridge
+            .copy_feature_report(3, 0x02, &mut feature, 100)
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && bridge.input_stats().pushed == 0 {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut input = [0_u8; 64];
+        assert_eq!(bridge.copy_next_input_report(2, &mut input).unwrap(), None);
+        let count = bridge
+            .copy_next_input_report(3, &mut input)
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(&input[..4], &[0x45, 0x83, 0x00, 0x00]);
 
         drop(bridge);
         server.join().unwrap();

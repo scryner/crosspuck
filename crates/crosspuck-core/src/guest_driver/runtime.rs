@@ -22,6 +22,7 @@ pub struct GuestDriverRuntime {
 pub struct GuestDriverSnapshot {
     pub identity_state: RuntimeIdentityState,
     pub bridge_connected: bool,
+    pub session_trace_id: Option<u32>,
     pub advertised_profiles: usize,
     pub open_handles: usize,
 }
@@ -61,6 +62,7 @@ impl GuestDriverRuntime {
                 .map(|identity| identity.state())
                 .unwrap_or(RuntimeIdentityState::Missing),
             bridge_connected: self.bridge.lock().is_ok_and(|bridge| bridge.is_some()),
+            session_trace_id: self.session_trace_id(),
             advertised_profiles: self
                 .catalog
                 .lock()
@@ -77,6 +79,13 @@ impl GuestDriverRuntime {
 
     pub fn catalog(&self) -> Option<VirtualHidProfileCatalog> {
         self.catalog_result().ok().flatten()
+    }
+
+    pub fn session_trace_id(&self) -> Option<u32> {
+        self.bridge
+            .lock()
+            .ok()
+            .and_then(|bridge| bridge.as_ref().map(|bridge| bridge.info().session_trace_id))
     }
 
     pub fn catalog_if_connected(&self) -> Option<VirtualHidProfileCatalog> {
@@ -238,7 +247,7 @@ impl GuestDriverRuntime {
         profile: VirtualHidProfile,
         output: &mut [u8],
     ) -> Result<Option<usize>, GuestDriverError> {
-        let interface_number = self.interface_number(profile)?;
+        let interface_number = self.connected_interface_number(profile)?;
         self.with_bridge("INPUT", |bridge| {
             bridge.copy_next_input_report(interface_number, output)
         })
@@ -250,7 +259,7 @@ impl GuestDriverRuntime {
         report_id: u8,
         output: &mut [u8],
     ) -> Result<usize, GuestDriverError> {
-        let interface_number = self.interface_number(profile)?;
+        let interface_number = self.connected_interface_number(profile)?;
         let timeout_ms = self.command_timeout_ms();
         self.with_bridge("GET_FEATURE", |bridge| {
             bridge.copy_feature_report(interface_number, report_id, output, timeout_ms)
@@ -262,7 +271,7 @@ impl GuestDriverRuntime {
         profile: VirtualHidProfile,
         payload: &[u8],
     ) -> Result<u16, GuestDriverError> {
-        let interface_number = self.interface_number(profile)?;
+        let interface_number = self.connected_interface_number(profile)?;
         let timeout_ms = self.command_timeout_ms();
         self.with_bridge("SET_FEATURE", |bridge| {
             bridge.set_feature(interface_number, payload, timeout_ms)
@@ -274,7 +283,7 @@ impl GuestDriverRuntime {
         profile: VirtualHidProfile,
         payload: &[u8],
     ) -> Result<u16, GuestDriverError> {
-        let interface_number = self.interface_number(profile)?;
+        let interface_number = self.connected_interface_number(profile)?;
         let timeout_ms = self.command_timeout_ms();
         self.with_bridge("SET_OUTPUT", |bridge| {
             bridge.set_output(interface_number, payload, timeout_ms)
@@ -286,7 +295,7 @@ impl GuestDriverRuntime {
         profile: VirtualHidProfile,
         payload: &[u8],
     ) -> Result<u16, GuestDriverError> {
-        let interface_number = self.interface_number(profile)?;
+        let interface_number = self.connected_interface_number(profile)?;
         let timeout_ms = self.command_timeout_ms();
         self.with_bridge("WRITE", |bridge| {
             bridge.write_report(interface_number, payload, timeout_ms)
@@ -323,6 +332,16 @@ impl GuestDriverRuntime {
                     .map(|descriptor| descriptor.interface_number)
             })
             .ok_or(GuestDriverError::ProfileUnavailable(profile))
+    }
+
+    fn connected_interface_number(
+        &self,
+        profile: VirtualHidProfile,
+    ) -> Result<u8, GuestDriverError> {
+        if !self.ensure_connected() {
+            return Err(GuestDriverError::DeviceNotConnected);
+        }
+        self.interface_number(profile)
     }
 
     fn with_bridge<T>(
@@ -487,6 +506,18 @@ mod tests {
 
         assert!(runtime.catalog().is_none());
         assert!(!runtime.can_advertise());
+    }
+
+    #[test]
+    fn command_without_catalog_reports_disconnected_before_profile_unavailable() {
+        let runtime = GuestDriverRuntime::new(RuntimeConfig {
+            host_bridge_required: true,
+            ..RuntimeConfig::default()
+        });
+
+        let result = runtime.set_feature(VirtualHidProfile::Main, &[0x00]);
+
+        assert!(matches!(result, Err(GuestDriverError::DeviceNotConnected)));
     }
 
     #[test]

@@ -121,6 +121,10 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    pub(crate) fn remaining(&self) -> usize {
+        self.input.len().saturating_sub(self.offset)
+    }
+
     pub(crate) fn u8(&mut self, field: &'static str) -> Result<u8, ProtocolError> {
         let bytes = self.take(field, 1)?;
         Ok(bytes[0])

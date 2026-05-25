@@ -4,6 +4,11 @@ use super::{MessageType, CONTROL_PAYLOAD_LIMIT, INPUT_PAYLOAD_LIMIT, PROTOCOL_VE
 
 pub const DEFAULT_GUEST_CAPABILITIES: u32 = 0;
 pub const DEFAULT_INPUT_QUEUE_CAPACITY: usize = 64;
+pub const SESSION_TRACE_ID_MASK: u32 = 0x000F_FFFF;
+
+pub fn session_trace_label(session_trace_id: u32) -> String {
+    format!("{:05x}", session_trace_id & SESSION_TRACE_ID_MASK)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Hello {
@@ -58,6 +63,7 @@ pub struct HelloOk {
     pub status: StatusCode,
     pub protocol_version: u16,
     pub session_id: u32,
+    pub session_trace_id: u32,
     pub control_payload_limit: u16,
     pub input_payload_limit: u16,
     pub default_input_report_len: u16,
@@ -65,10 +71,19 @@ pub struct HelloOk {
 
 impl HelloOk {
     pub fn success(session_id: u32, default_input_report_len: u16) -> Self {
+        Self::success_with_trace(session_id, 0, default_input_report_len)
+    }
+
+    pub fn success_with_trace(
+        session_id: u32,
+        session_trace_id: u32,
+        default_input_report_len: u16,
+    ) -> Self {
         Self {
             status: StatusCode::Ok,
             protocol_version: PROTOCOL_VERSION as u16,
             session_id,
+            session_trace_id: session_trace_id & SESSION_TRACE_ID_MASK,
             control_payload_limit: CONTROL_PAYLOAD_LIMIT as u16,
             input_payload_limit: INPUT_PAYLOAD_LIMIT as u16,
             default_input_report_len,
@@ -86,6 +101,7 @@ impl WireEncode for HelloOk {
         encoder.u16(self.input_payload_limit);
         encoder.u16(self.default_input_report_len);
         encoder.u16(0);
+        encoder.u32(self.session_trace_id & SESSION_TRACE_ID_MASK);
         Ok(())
     }
 }
@@ -97,11 +113,16 @@ impl WireDecode for HelloOk {
             status: StatusCode::try_from(decoder.u16("status")?)?,
             protocol_version: decoder.u16("protocol_version")?,
             session_id: decoder.u32("session_id")?,
+            session_trace_id: 0,
             control_payload_limit: decoder.u16("control_payload_limit")?,
             input_payload_limit: decoder.u16("input_payload_limit")?,
             default_input_report_len: decoder.u16("default_input_report_len")?,
         };
         decoder.reserved_u16("hello_ok.reserved_zero")?;
+        let mut value = value;
+        if decoder.remaining() > 0 {
+            value.session_trace_id = decoder.u32("session_trace_id")? & SESSION_TRACE_ID_MASK;
+        }
         decoder.finish()?;
         Ok(value)
     }
@@ -816,6 +837,34 @@ mod tests {
             vec![0x44, 0x33, 0x22, 0x11, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
         assert_eq!(Hello::decode(&hello.to_bytes().unwrap()).unwrap(), hello);
+    }
+
+    #[test]
+    fn hello_ok_round_trips_session_trace_id() {
+        let hello_ok = HelloOk::success_with_trace(0xAABB_CCDD, 0x12_3456, 54);
+        let decoded = HelloOk::decode(&hello_ok.to_bytes().unwrap()).unwrap();
+
+        assert_eq!(decoded.session_id, 0xAABB_CCDD);
+        assert_eq!(decoded.session_trace_id, 0x2_3456);
+        assert_eq!(session_trace_label(decoded.session_trace_id), "23456");
+    }
+
+    #[test]
+    fn hello_ok_decodes_legacy_payload_without_session_trace_id() {
+        let mut legacy_payload = Vec::new();
+        let mut encoder = Encoder::new(&mut legacy_payload);
+        encoder.u16(StatusCode::Ok.into());
+        encoder.u16(PROTOCOL_VERSION as u16);
+        encoder.u32(0xAABB_CCDD);
+        encoder.u16(CONTROL_PAYLOAD_LIMIT as u16);
+        encoder.u16(INPUT_PAYLOAD_LIMIT as u16);
+        encoder.u16(54);
+        encoder.u16(0);
+
+        let decoded = HelloOk::decode(&legacy_payload).unwrap();
+
+        assert_eq!(decoded.session_id, 0xAABB_CCDD);
+        assert_eq!(decoded.session_trace_id, 0);
     }
 
     #[test]

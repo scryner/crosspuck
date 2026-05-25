@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 crosspuck-core.workspace = true
+sha2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
