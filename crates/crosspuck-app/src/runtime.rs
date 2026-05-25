@@ -462,7 +462,7 @@ fn run_control_loop(
                 let request = GetFeature::decode(&frame.payload)?;
                 let result = backend.get_feature(&request);
                 if !result.status.is_ok() {
-                    eprintln!(
+                    log::warn!(
                         "CrossPuck[{session_trace}] GET_FEATURE id={} interface={} report_id=0x{:02X} status={}",
                         frame.header.id, request.interface_number, request.report_id, result.status
                     );
@@ -473,7 +473,7 @@ fn run_control_loop(
                 let request = SetFeature::decode(&frame.payload)?;
                 let result = backend.set_feature(&request);
                 if !result.status.is_ok() {
-                    eprintln!(
+                    log::warn!(
                         "CrossPuck[{session_trace}] SET_FEATURE id={} interface={} len={} status={}",
                         frame.header.id,
                         request.interface_number,
@@ -487,7 +487,7 @@ fn run_control_loop(
                 let request = SetOutput::decode(&frame.payload)?;
                 let result = backend.set_output(&request);
                 if !result.status.is_ok() {
-                    eprintln!(
+                    log::warn!(
                         "CrossPuck[{session_trace}] SET_OUTPUT id={} interface={} len={} status={}",
                         frame.header.id,
                         request.interface_number,
@@ -501,7 +501,7 @@ fn run_control_loop(
                 let request = WriteReport::decode(&frame.payload)?;
                 let result = backend.write_report(&request);
                 if !result.status.is_ok() {
-                    eprintln!(
+                    log::warn!(
                         "CrossPuck[{session_trace}] WRITE id={} interface={} len={} status={}",
                         frame.header.id,
                         request.interface_number,

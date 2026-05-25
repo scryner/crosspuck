@@ -28,19 +28,25 @@ pub(crate) fn set_host_log_session_trace_id(session_trace_id: Option<u32>) {
     }
 }
 
-fn log_host_guest_event(args: fmt::Arguments<'_>) {
+macro_rules! warn_host_guest_event {
+    ($($arg:tt)*) => {
+        log_host_guest_warning(format_args!($($arg)*))
+    };
+}
+
+fn log_host_guest_warning(args: std::fmt::Arguments<'_>) {
     match HOST_LOG_SESSION_TRACE_ID
         .lock()
         .ok()
         .and_then(|guard| *guard)
     {
         Some(session_trace_id) => {
-            eprintln!(
+            log::warn!(
                 "CrossPuck[{}] {args}",
                 session_trace_label(session_trace_id)
             );
         }
-        None => eprintln!("CrossPuck {args}"),
+        None => log::warn!("CrossPuck {args}"),
     }
 }
 
@@ -190,10 +196,13 @@ impl RealHostBackend {
             }
             match self.open_input_device_for_collection(collection) {
                 Ok(reader) => readers.push(reader),
-                Err(error) => log_host_guest_event(format_args!(
+                Err(error) => warn_host_guest_event!(
                     "HID input open failed: interface={} role={:?} path={} error={}",
-                    collection.interface_number, collection.role, collection.path, error
-                )),
+                    collection.interface_number,
+                    collection.role,
+                    collection.path,
+                    error
+                ),
             }
         }
         readers
@@ -277,13 +286,13 @@ impl RealHostBackend {
                 let _ = self.refresh_main_device();
             }
 
-            log_host_guest_event(format_args!(
+            warn_host_guest_event!(
                 "HID write failed: interface={} path={} len={} error={}",
                 interface_number,
                 self.main_path(),
                 data.len(),
                 last_error.unwrap_or_else(|| "unknown HID write error".to_string())
-            ));
+            );
             return WriteResult {
                 status: StatusCode::HidIoError,
                 bytes_written: 0,
@@ -317,13 +326,13 @@ impl RealHostBackend {
         }
 
         let error = last_error.expect("paths must not be empty");
-        log_host_guest_event(format_args!(
+        warn_host_guest_event!(
             "HID write failed: interface={} paths={} len={} error={}",
             interface_number,
             describe_paths(&paths),
             data.len(),
             error
-        ));
+        );
         hid_write_error(error)
     }
 }
@@ -369,14 +378,14 @@ impl HostBackend for RealHostBackend {
                 data: buffer[..read.min(buffer.len())].to_vec(),
             },
             Err(error) => {
-                log_host_guest_event(format_args!(
+                warn_host_guest_event!(
                     "HID get_feature failed: interface={} paths={} report_id=0x{:02X} len={} error={}",
                     request.interface_number,
                     describe_paths(&error.paths),
                     request.report_id,
                     request.requested_len,
                     error.message
-                ));
+                );
                 FeatureResult {
                     status: StatusCode::HidIoError,
                     os_error: 0,
@@ -414,13 +423,13 @@ impl HostBackend for RealHostBackend {
                         os_error: 0,
                     };
                 }
-                log_host_guest_event(format_args!(
+                warn_host_guest_event!(
                     "HID set_feature failed: interface={} paths={} len={} error={}",
                     request.interface_number,
                     describe_paths(&error.paths),
                     request.data.len(),
                     error.message
-                ));
+                );
                 SetFeatureResult {
                     status: StatusCode::HidIoError,
                     bytes_accepted: 0,
@@ -748,14 +757,14 @@ impl CollectionInputReader {
                 self.consecutive_errors = self.consecutive_errors.saturating_add(1);
 
                 if self.consecutive_errors == 1 || self.consecutive_errors.is_multiple_of(40) {
-                    log_host_guest_event(format_args!(
+                    warn_host_guest_event!(
                         "HID input read failed: interface={} role={:?} path={} errors={} error={}",
                         self.descriptor.interface_number,
                         self.descriptor.role,
                         self.path_text(),
                         self.consecutive_errors,
                         error
-                    ));
+                    );
                 }
 
                 if self.consecutive_errors == 1 || self.consecutive_errors.is_multiple_of(4) {
@@ -768,13 +777,13 @@ impl CollectionInputReader {
                             if self.consecutive_errors == 1
                                 || self.consecutive_errors.is_multiple_of(40) =>
                         {
-                            log_host_guest_event(format_args!(
+                            warn_host_guest_event!(
                                 "HID input reopen failed: interface={} role={:?} path={} error={}",
                                 self.descriptor.interface_number,
                                 self.descriptor.role,
                                 self.path_text(),
                                 refresh_error
-                            ));
+                            );
                         }
                         Err(_) => {}
                     }

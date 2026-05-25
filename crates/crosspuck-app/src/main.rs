@@ -3,6 +3,8 @@ use std::process::ExitCode;
 #[cfg(target_os = "macos")]
 mod hid_backend;
 #[cfg(target_os = "macos")]
+mod logging;
+#[cfg(target_os = "macos")]
 mod runtime;
 
 #[cfg(target_os = "macos")]
@@ -12,7 +14,7 @@ fn main() -> ExitCode {
 
 #[cfg(not(target_os = "macos"))]
 fn main() -> ExitCode {
-    eprintln!("crosspuck-app is only supported on macOS.");
+    log::error!("crosspuck-app is only supported on macOS.");
     ExitCode::from(1)
 }
 
@@ -128,6 +130,12 @@ mod macos {
     }
 
     pub fn run() -> ExitCode {
+        let logging_config = crate::logging::startup_config();
+        let logging_initialized = crate::logging::init(&logging_config).is_ok();
+        if logging_initialized {
+            crate::logging::log_startup(&logging_config);
+        }
+
         let mtm = MainThreadMarker::new().expect("crosspuck-app must run on the main thread");
 
         unsafe {
@@ -137,12 +145,14 @@ mod macos {
 
             let app_state = AppState::new();
             let service_handle = start_host_service(app_state.clone());
+            log::info!("CrossPuck host app started");
             let menu_objects = build_menu_bar(app.clone(), mtm, &app_state, service_handle);
             Box::leak(Box::new(menu_objects));
 
             app.run();
         }
 
+        log::info!("CrossPuck host app stopped");
         ExitCode::SUCCESS
     }
 
