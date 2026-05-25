@@ -10,14 +10,17 @@ Installs the production crosspuck-driver hid.dll next to Steam.exe inside a
 CrossOver bottle and writes an optional registry file for Wine override and
 trace/log settings.
 
+The script verifies that the Rust Windows GNU target is installed, builds the
+driver with Cargo, and then installs the resulting DLL.
+
 Options:
   --bottle NAME       CrossOver bottle name. Defaults to Steam when present.
   --bottle-path PATH  Absolute bottle path.
-  --driver PATH       hid.dll path. Defaults to target/x86_64-pc-windows-gnu/release/hid.dll.
+  --driver PATH       hid.dll path to copy after the build. Defaults to the Cargo release output.
   --steam-dir PATH    Steam directory inside the bottle. Auto-detected from Steam.exe.
   --log-file PATH     Unix path for the driver log file. Defaults to the Steam directory.
   --log-level LEVEL   Set CROSSPUCK_LOG_LEVEL. Defaults to info.
-  --trace 0|1         Set CROSSPUCK_TRACE_REPORTS. Defaults to 1.
+  --trace 0|1         Set CROSSPUCK_TRACE_REPORTS. Defaults to 0.
   --required 0|1      Set CROSSPUCK_HOST_BRIDGE_REQUIRED. Defaults to 1.
   --help              Show this help.
 
@@ -28,15 +31,49 @@ USAGE
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
+driver_target="x86_64-pc-windows-gnu"
 
 bottle_name=""
 bottle_path=""
-driver_path="$repo_root/target/x86_64-pc-windows-gnu/release/hid.dll"
+driver_path="$repo_root/target/$driver_target/release/hid.dll"
 steam_dir=""
 log_file=""
 log_level="info"
-trace_reports="1"
+trace_reports="0"
 required="1"
+
+ensure_driver_target_installed() {
+  if ! command -v rustup >/dev/null 2>&1; then
+    cat >&2 <<EOF
+rustup is required to verify the Windows target before building the driver.
+
+Install rustup first, then add the driver target:
+  rustup target add $driver_target
+EOF
+    exit 1
+  fi
+
+  if ! rustup target list --installed | grep -Fxq "$driver_target"; then
+    cat >&2 <<EOF
+Required Rust target is not installed:
+  $driver_target
+
+Install it first:
+  rustup target add $driver_target
+EOF
+    exit 1
+  fi
+}
+
+build_driver() {
+  ensure_driver_target_installed
+  echo "Building crosspuck-driver for $driver_target..."
+  cargo build \
+    --manifest-path "$repo_root/Cargo.toml" \
+    -p crosspuck-driver \
+    --release \
+    --target "$driver_target"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -104,12 +141,14 @@ if [[ ! -d "$bottle_path/drive_c" ]]; then
   exit 1
 fi
 
+build_driver
+
 if [[ ! -f "$driver_path" ]]; then
   cat >&2 <<EOF
 Driver DLL not found:
   $driver_path
 
-Build it first:
+The driver build completed, but the expected DLL is missing. Expected build command:
   cargo build -p crosspuck-driver --release --target x86_64-pc-windows-gnu
 EOF
   exit 1
@@ -159,7 +198,7 @@ Windows Registry Editor Version 5.00
 "CROSSPUCK_TRACE_REPORT_MAX_BYTES"="128"
 "CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS"="1000"
 "CROSSPUCK_HOST_BRIDGE_HANDSHAKE_TIMEOUT_MS"="2000"
-"CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS"="1000"
+"CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS"=-
 "CROSSPUCK_HOST_BRIDGE_RECONNECT_INTERVAL_MS"="1000"
 
 [HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]

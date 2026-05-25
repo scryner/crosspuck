@@ -83,7 +83,7 @@ impl RuntimeConfig {
     }
 
     pub fn driver_from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
-        let mut config = Self::from_lookup_with_defaults(&mut lookup, true, true, true);
+        let mut config = Self::from_lookup_with_defaults(&mut lookup, true, true, false);
         config.connect_timeout = config.connect_timeout.min(DRIVER_MAX_CONNECT_TIMEOUT);
         config
     }
@@ -250,7 +250,7 @@ mod tests {
         assert!(config.host_bridge_enabled);
         assert!(config.host_bridge_required);
         assert!(!config.replay_enabled);
-        assert!(config.trace_reports);
+        assert!(!config.trace_reports);
         assert_eq!(config.log_level, GuestLogLevel::Info);
         assert!(!config.allow_debug_fallback());
         assert_eq!(config.connect_timeout, DEFAULT_CONNECT_TIMEOUT);
