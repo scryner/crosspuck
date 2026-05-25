@@ -327,7 +327,7 @@ impl GuestControl {
             requested_len,
             timeout_ms,
         };
-        self.control_request::<_, FeatureResult>(&request)
+        self.control_request::<_, FeatureResult>(&request, timeout_ms)
     }
 
     pub fn set_feature(
@@ -341,7 +341,7 @@ impl GuestControl {
             timeout_ms,
             data: payload.to_vec(),
         };
-        self.control_request::<_, SetFeatureResult>(&request)
+        self.control_request::<_, SetFeatureResult>(&request, timeout_ms)
     }
 
     pub fn set_output(
@@ -355,7 +355,7 @@ impl GuestControl {
             timeout_ms,
             data: payload.to_vec(),
         };
-        self.control_request::<_, SetOutputResult>(&request)
+        self.control_request::<_, SetOutputResult>(&request, timeout_ms)
     }
 
     pub fn write_report(
@@ -369,10 +369,10 @@ impl GuestControl {
             timeout_ms,
             data: payload.to_vec(),
         };
-        self.control_request::<_, WriteResult>(&request)
+        self.control_request::<_, WriteResult>(&request, timeout_ms)
     }
 
-    fn control_request<T, R>(&mut self, request: &T) -> Result<R, GuestError>
+    fn control_request<T, R>(&mut self, request: &T, timeout_ms: u16) -> Result<R, GuestError>
     where
         T: WirePayload,
         R: WirePayload,
@@ -380,6 +380,11 @@ impl GuestControl {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
 
+        if timeout_ms > 0 {
+            let timeout = Some(Duration::from_millis(u64::from(timeout_ms)));
+            self.control.set_read_timeout(timeout)?;
+            self.control.set_write_timeout(timeout)?;
+        }
         write_payload(&mut self.control, request_id, request)?;
         let response = self.control.read_frame()?;
         if response.header.id != request_id {

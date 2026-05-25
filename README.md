@@ -97,7 +97,9 @@ bottle when you want explicit Wine DLL override and environment settings:
 
 The driver has safe built-in defaults, so it can run with only the DLL present
 as long as the host app is already running. Importing the registry remains
-recommended for smoke testing and explicit configuration.
+recommended for smoke testing and explicit configuration. The generated
+registry file removes any older global `CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS`
+override so the driver can use its built-in operation-specific timeouts.
 
 ## Tools And Diagnostics
 

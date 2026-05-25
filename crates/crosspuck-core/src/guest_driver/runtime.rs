@@ -1,16 +1,20 @@
 use super::bridge::{HostBridge, HostBridgeError};
-use super::config::RuntimeConfig;
+use super::config::{RuntimeConfig, DEFAULT_IO_TIMEOUT};
 use super::handles::{VirtualHandleId, VirtualHandleTable};
 use super::identity::{RuntimeIdentity, RuntimeIdentityState};
 use super::profile::{VirtualHidProfile, VirtualHidProfileCatalog};
 use super::trace::TraceLimiter;
 use std::fmt;
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const DEFAULT_GET_FEATURE_TIMEOUT: Duration = Duration::from_millis(100);
+const DEFAULT_SET_FEATURE_TIMEOUT: Duration = Duration::from_millis(50);
+const DEFAULT_FEEDBACK_TIMEOUT: Duration = Duration::from_millis(20);
 
 pub struct GuestDriverRuntime {
     config: RuntimeConfig,
-    bridge: Mutex<Option<HostBridge>>,
+    bridge: Mutex<Option<Arc<HostBridge>>>,
     identity: Mutex<RuntimeIdentity>,
     catalog: Mutex<Option<VirtualHidProfileCatalog>>,
     handles: Mutex<VirtualHandleTable>,
@@ -150,7 +154,7 @@ impl GuestDriverRuntime {
     }
 
     pub fn connect_bridge(&self) -> Result<(), GuestDriverError> {
-        let bridge = HostBridge::connect(self.config.host_bridge_config())?;
+        let bridge = Arc::new(HostBridge::connect(self.config.host_bridge_config())?);
         let identity_payload = bridge.info().identity.clone();
         let catalog = VirtualHidProfileCatalog::from_identity(
             &identity_payload,
@@ -177,9 +181,29 @@ impl GuestDriverRuntime {
     }
 
     pub fn clear_bridge(&self, _reason: &'static str) {
-        if let Ok(mut bridge) = self.bridge.lock() {
-            bridge.take();
+        let removed_bridge = self.bridge.lock().ok().and_then(|mut bridge| bridge.take());
+        drop(removed_bridge);
+        self.mark_bridge_stale();
+    }
+
+    fn clear_bridge_if_current(&self, current_bridge: &Arc<HostBridge>, _reason: &'static str) {
+        let removed_bridge = self.bridge.lock().ok().and_then(|mut bridge| {
+            if bridge
+                .as_ref()
+                .is_some_and(|bridge| Arc::ptr_eq(bridge, current_bridge))
+            {
+                bridge.take()
+            } else {
+                None
+            }
+        });
+        if removed_bridge.is_some() {
+            drop(removed_bridge);
+            self.mark_bridge_stale();
         }
+    }
+
+    fn mark_bridge_stale(&self) {
         let next_identity = if let Ok(mut identity) = self.identity.lock() {
             identity.mark_stale();
             identity.identity().cloned()
@@ -260,7 +284,7 @@ impl GuestDriverRuntime {
         output: &mut [u8],
     ) -> Result<usize, GuestDriverError> {
         let interface_number = self.connected_interface_number(profile)?;
-        let timeout_ms = self.command_timeout_ms();
+        let timeout_ms = self.operation_timeout_ms(DEFAULT_GET_FEATURE_TIMEOUT);
         self.with_bridge("GET_FEATURE", |bridge| {
             bridge.copy_feature_report(interface_number, report_id, output, timeout_ms)
         })
@@ -272,7 +296,7 @@ impl GuestDriverRuntime {
         payload: &[u8],
     ) -> Result<u16, GuestDriverError> {
         let interface_number = self.connected_interface_number(profile)?;
-        let timeout_ms = self.command_timeout_ms();
+        let timeout_ms = self.operation_timeout_ms(DEFAULT_SET_FEATURE_TIMEOUT);
         self.with_bridge("SET_FEATURE", |bridge| {
             bridge.set_feature(interface_number, payload, timeout_ms)
         })
@@ -284,7 +308,7 @@ impl GuestDriverRuntime {
         payload: &[u8],
     ) -> Result<u16, GuestDriverError> {
         let interface_number = self.connected_interface_number(profile)?;
-        let timeout_ms = self.command_timeout_ms();
+        let timeout_ms = self.operation_timeout_ms(DEFAULT_FEEDBACK_TIMEOUT);
         self.with_bridge("SET_OUTPUT", |bridge| {
             bridge.set_output(interface_number, payload, timeout_ms)
         })
@@ -296,7 +320,7 @@ impl GuestDriverRuntime {
         payload: &[u8],
     ) -> Result<u16, GuestDriverError> {
         let interface_number = self.connected_interface_number(profile)?;
-        let timeout_ms = self.command_timeout_ms();
+        let timeout_ms = self.operation_timeout_ms(DEFAULT_FEEDBACK_TIMEOUT);
         self.with_bridge("WRITE", |bridge| {
             bridge.write_report(interface_number, payload, timeout_ms)
         })
@@ -352,21 +376,19 @@ impl GuestDriverRuntime {
         if !self.ensure_connected() {
             return Err(GuestDriverError::DeviceNotConnected);
         }
-        let result = {
-            let bridge = self
-                .bridge
-                .lock()
-                .map_err(|_| GuestDriverError::StatePoisoned("bridge"))?;
-            let bridge = bridge
-                .as_ref()
-                .ok_or(GuestDriverError::DeviceNotConnected)?;
-            call(bridge)
-        };
+        let bridge = self
+            .bridge
+            .lock()
+            .map_err(|_| GuestDriverError::StatePoisoned("bridge"))?
+            .as_ref()
+            .cloned()
+            .ok_or(GuestDriverError::DeviceNotConnected)?;
+        let result = call(&bridge);
         match result {
             Ok(value) => Ok(value),
             Err(error) => {
                 if error.should_disconnect_bridge() {
-                    self.clear_bridge(operation);
+                    self.clear_bridge_if_current(&bridge, operation);
                 }
                 Err(error.into())
             }
@@ -387,8 +409,13 @@ impl GuestDriverRuntime {
         true
     }
 
-    fn command_timeout_ms(&self) -> u16 {
-        self.config.io_timeout.as_millis().min(u128::from(u16::MAX)) as u16
+    fn operation_timeout_ms(&self, default_timeout: Duration) -> u16 {
+        let timeout = if self.config.io_timeout == DEFAULT_IO_TIMEOUT {
+            default_timeout
+        } else {
+            self.config.io_timeout
+        };
+        timeout.as_millis().min(u128::from(u16::MAX)) as u16
     }
 
     fn bridge_healthy(&self) -> bool {
@@ -442,6 +469,14 @@ impl From<HostBridgeError> for GuestDriverError {
 mod tests {
     use super::*;
     use crate::guest_driver::identity::default_fallback_identity;
+    use crate::protocol::{
+        CollectionRole, Frame, HelloOk, InputAttach, InputAttachOk, InputReport, MessageType,
+        StatusCode, WireDecode, WirePayload, WriteReport, WriteResult,
+    };
+    use crate::transport::{ChannelStream, TransportAddrs, TransportListeners};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn required_mode_starts_without_advertised_profiles() {
@@ -547,5 +582,159 @@ mod tests {
             default_fallback_identity().serial
         );
         assert!(runtime.can_advertise());
+    }
+
+    #[test]
+    fn operation_timeouts_follow_low_latency_defaults_unless_overridden() {
+        let runtime = GuestDriverRuntime::new(RuntimeConfig::default());
+
+        assert_eq!(
+            runtime.operation_timeout_ms(DEFAULT_GET_FEATURE_TIMEOUT),
+            100
+        );
+        assert_eq!(
+            runtime.operation_timeout_ms(DEFAULT_SET_FEATURE_TIMEOUT),
+            50
+        );
+        assert_eq!(runtime.operation_timeout_ms(DEFAULT_FEEDBACK_TIMEOUT), 20);
+
+        let runtime = GuestDriverRuntime::new(RuntimeConfig {
+            io_timeout: Duration::from_millis(75),
+            ..RuntimeConfig::default()
+        });
+
+        assert_eq!(
+            runtime.operation_timeout_ms(DEFAULT_GET_FEATURE_TIMEOUT),
+            75
+        );
+        assert_eq!(
+            runtime.operation_timeout_ms(DEFAULT_SET_FEATURE_TIMEOUT),
+            75
+        );
+        assert_eq!(runtime.operation_timeout_ms(DEFAULT_FEEDBACK_TIMEOUT), 75);
+    }
+
+    #[test]
+    fn input_pop_is_not_blocked_by_pending_feedback_command() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = listeners.local_addrs().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (write_received_tx, write_received_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut control = listeners.accept_control().unwrap();
+            control
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            control
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let hello = control.read_frame().unwrap();
+            assert_eq!(hello.header.message_type, MessageType::Hello);
+            write_test_payload(
+                &mut control,
+                hello.header.id,
+                &HelloOk::success(0xCAFE_BABE, 54),
+            );
+            write_test_payload(&mut control, 0, &default_fallback_identity());
+
+            let mut input = listeners.accept_input().unwrap();
+            input
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            input
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let attach = input.read_frame().unwrap();
+            assert_eq!(attach.header.message_type, MessageType::InputAttach);
+            let attach_payload = InputAttach::decode(&attach.payload).unwrap();
+            assert_eq!(attach_payload.session_id, 0xCAFE_BABE);
+            write_test_payload(
+                &mut input,
+                attach.header.id,
+                &InputAttachOk {
+                    status: StatusCode::Ok,
+                    input_report_len: 54,
+                    first_input_seq: 1,
+                },
+            );
+
+            let write = control.read_frame().unwrap();
+            assert_eq!(write.header.message_type, MessageType::Write);
+            let write_payload = WriteReport::decode(&write.payload).unwrap();
+            write_received_tx.send(()).unwrap();
+            write_test_payload(
+                &mut input,
+                1,
+                &InputReport {
+                    interface_number: 2,
+                    role: CollectionRole::PuckMain,
+                    host_monotonic_us: 42,
+                    data: vec![0x79, 0x02],
+                },
+            );
+            thread::sleep(Duration::from_millis(120));
+            write_test_payload(
+                &mut control,
+                write.header.id,
+                &WriteResult {
+                    status: StatusCode::Ok,
+                    bytes_written: write_payload.data.len() as u16,
+                    os_error: 0,
+                },
+            );
+        });
+
+        ready_rx.recv().unwrap();
+        let runtime = Arc::new(GuestDriverRuntime::new(RuntimeConfig {
+            addrs,
+            host_bridge_enabled: true,
+            host_bridge_required: true,
+            io_timeout: Duration::from_millis(250),
+            ..RuntimeConfig::default()
+        }));
+        runtime.connect_bridge().unwrap();
+
+        let writer_runtime = Arc::clone(&runtime);
+        let writer = thread::spawn(move || {
+            writer_runtime
+                .write_report(VirtualHidProfile::Main, &[0x80, 0x00])
+                .unwrap()
+        });
+        write_received_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let mut output = [0_u8; 64];
+        let started = Instant::now();
+        let count = loop {
+            if let Some(count) = runtime
+                .copy_next_input_report(VirtualHidProfile::Main, &mut output)
+                .unwrap()
+            {
+                break count;
+            }
+            assert!(
+                started.elapsed() < Duration::from_millis(80),
+                "input report was blocked behind pending feedback command"
+            );
+            thread::sleep(Duration::from_millis(1));
+        };
+
+        assert_eq!(count, 2);
+        assert_eq!(&output[..2], &[0x79, 0x02]);
+        assert_eq!(writer.join().unwrap(), 2);
+        server.join().unwrap();
+    }
+
+    fn write_test_payload<T: WirePayload>(stream: &mut ChannelStream, id: u32, payload: &T) {
+        stream
+            .write_frame(&Frame::new(
+                T::MESSAGE_TYPE,
+                id,
+                payload.to_bytes().unwrap(),
+            ))
+            .unwrap();
     }
 }

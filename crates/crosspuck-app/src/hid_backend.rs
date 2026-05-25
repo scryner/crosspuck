@@ -86,9 +86,8 @@ pub(crate) struct RealHostBackend {
 #[derive(Clone, Debug)]
 struct SharedMainDevice {
     interface_number: u8,
-    input_report_len: u16,
     path: Arc<Mutex<String>>,
-    device: Arc<Mutex<HidDevice>>,
+    command_device: Arc<Mutex<HidDevice>>,
 }
 
 impl RealHostBackend {
@@ -150,7 +149,7 @@ impl RealHostBackend {
 
         *self
             .main
-            .device
+            .command_device
             .lock()
             .map_err(|_| HostHidError::DeviceLockPoisoned)? = device;
         *self
@@ -175,9 +174,8 @@ impl RealHostBackend {
         let device = open_path_with_new_api(&collection.path)?;
         Ok(SharedMainDevice {
             interface_number,
-            input_report_len: collection.input_report_len,
             path: Arc::new(Mutex::new(collection.path.clone())),
-            device: Arc::new(Mutex::new(device)),
+            command_device: Arc::new(Mutex::new(device)),
         })
     }
 
@@ -219,12 +217,13 @@ impl RealHostBackend {
             role: CollectionRole::from(collection.role),
         };
         if self.is_main_interface(interface_number) {
+            let device = open_path_with_new_api(&collection.path)?;
             return Ok(CollectionInputReader::new(
                 self.clone(),
                 descriptor,
                 collection.input_report_len,
-                Arc::clone(&self.main.path),
-                Arc::clone(&self.main.device),
+                Arc::new(Mutex::new(collection.path.clone())),
+                Arc::new(Mutex::new(device)),
             ));
         }
 
@@ -268,7 +267,7 @@ impl RealHostBackend {
                 if attempt > 0 {
                     thread::sleep(FEATURE_REPORT_RETRY_DELAY);
                 }
-                match self.main.device.lock() {
+                match self.main.command_device.lock() {
                     Ok(device) => match device.write(data) {
                         Ok(written) => {
                             return WriteResult {
@@ -453,7 +452,7 @@ impl HostBackend for RealHostBackend {
     }
 
     fn cleanup_feedback(&self) {
-        if let Ok(device) = self.main.device.lock() {
+        if let Ok(device) = self.main.command_device.lock() {
             let _ = device.write(&RUMBLE_STOP);
             let _ = device.write(&COMMAND_OFF);
         }
@@ -476,7 +475,7 @@ impl RealHostBackend {
                 *first = report_id;
             }
 
-            match self.main.device.lock() {
+            match self.main.command_device.lock() {
                 Ok(device) => match device.get_feature_report(buffer) {
                     Ok(read) => return Ok(read),
                     Err(error) => last_error = Some(error.to_string()),
@@ -503,7 +502,7 @@ impl RealHostBackend {
                 thread::sleep(FEATURE_REPORT_RETRY_DELAY);
             }
 
-            match self.main.device.lock() {
+            match self.main.command_device.lock() {
                 Ok(device) => match device.send_feature_report(data) {
                     Ok(()) => return Ok(data.len()),
                     Err(error) => {
@@ -824,8 +823,19 @@ impl CollectionInputReader {
             .backend
             .is_main_interface(self.descriptor.interface_number)
         {
-            self.backend.refresh_main_device()?;
-            self.resize_buffer(self.backend.main.input_report_len);
+            let (path, input_report_len, device) = self.backend.open_input_device_for_interface(
+                self.descriptor.interface_number,
+                self.descriptor.role,
+            )?;
+            *self
+                .device
+                .lock()
+                .map_err(|_| HostHidError::DeviceLockPoisoned)? = device;
+            *self
+                .path
+                .lock()
+                .map_err(|_| HostHidError::DeviceLockPoisoned)? = path;
+            self.resize_buffer(input_report_len);
             return Ok(());
         }
 

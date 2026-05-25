@@ -24,7 +24,9 @@ tools/crossover/install-driver.sh \
 
 The script copies `hid.dll`, backs up any existing app-local `hid.dll`, creates
 `crosspuck-driver-env.reg` in the bottle root, and initializes
-`crosspuck-driver.log` next to Steam.
+`crosspuck-driver.log` next to Steam. The generated registry file removes any
+older global `CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS` override so the driver uses
+its operation-specific low-latency defaults.
 
 Do not copy this DLL into `drive_c/windows/system32`. The driver is intended to
 be app-local and forwards non-virtual HID calls to the real system HID DLL.

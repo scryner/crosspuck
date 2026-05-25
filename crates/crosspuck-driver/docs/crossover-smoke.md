@@ -84,18 +84,22 @@ CROSSPUCK_LOG_LEVEL=info
 CROSSPUCK_TRACE_REPORTS=1
 CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS=1000
 CROSSPUCK_HOST_BRIDGE_HANDSHAKE_TIMEOUT_MS=2000
-CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS=1000
 ```
 
-With those defaults, discovery should work without importing this registry file
-as long as the host app is running before Steam starts.
+When `CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS` is unset, the driver uses
+operation-specific low-latency timeouts: `WRITE`/`SET_OUTPUT` 20ms,
+`SET_FEATURE` 50ms, and `GET_FEATURE` 100ms. With those defaults, discovery
+should work without importing this registry file as long as the host app is
+running before Steam starts.
 
 Importing the `.reg` file is still useful for two reasons:
 
 - it sets Wine's `hid` DLL override to prefer the native DLL copied next to
   `Steam.exe`,
 - it sets the `CROSSPUCK_*` bridge/trace environment variables used by the
-  guest driver.
+  guest driver,
+- it removes any older global `CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS` registry
+  value so the per-operation defaults apply.
 
 The registry file sets this DLL override:
 

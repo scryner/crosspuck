@@ -97,15 +97,16 @@ CROSSPUCK_LOG_LEVEL=info
 CROSSPUCK_TRACE_REPORTS=1
 CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS=1000
 CROSSPUCK_HOST_BRIDGE_HANDSHAKE_TIMEOUT_MS=2000
-CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS=1000
 ```
 
+`CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS`가 없으면 driver는 operation별 low-latency timeout을 사용합니다: `WRITE`/`SET_OUTPUT` 20ms, `SET_FEATURE` 50ms, `GET_FEATURE` 100ms.
 따라서 registry import 없이도 host app이 먼저 실행되어 있으면 bridge 연결과 synthetic HID discovery가 동작해야 합니다.
 
 `.reg` import는 두 가지 설정을 명시적으로 bottle registry에 반영하기 위해 사용합니다.
 
 1. Wine이 `hid.dll`을 native 우선으로 로드하도록 DLL override를 설정합니다.
 2. guest driver가 host bridge와 trace 설정을 알 수 있도록 `CROSSPUCK_*` 환경 변수를 설정합니다.
+3. 이전 registry import에 남아 있을 수 있는 전역 `CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS` 값을 삭제해 operation별 기본 timeout이 적용되게 합니다.
 
 설정되는 DLL override:
 
