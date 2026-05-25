@@ -18,7 +18,7 @@ tools/crossover/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
   --log-level info \
-  --trace 1 \
+  --trace 0 \
   --required 1
 ```
 

@@ -321,13 +321,30 @@ impl GuestControl {
         requested_len: u16,
         timeout_ms: u16,
     ) -> Result<FeatureResult, GuestError> {
+        self.get_feature_with_transport_timeout(
+            interface_number,
+            report_id,
+            requested_len,
+            timeout_ms,
+            timeout_ms,
+        )
+    }
+
+    pub fn get_feature_with_transport_timeout(
+        &mut self,
+        interface_number: u8,
+        report_id: u8,
+        requested_len: u16,
+        timeout_ms: u16,
+        transport_timeout_ms: u16,
+    ) -> Result<FeatureResult, GuestError> {
         let request = GetFeature {
             interface_number,
             report_id,
             requested_len,
             timeout_ms,
         };
-        self.control_request::<_, FeatureResult>(&request, timeout_ms)
+        self.control_request::<_, FeatureResult>(&request, transport_timeout_ms)
     }
 
     pub fn set_feature(
@@ -336,12 +353,22 @@ impl GuestControl {
         timeout_ms: u16,
         payload: &[u8],
     ) -> Result<SetFeatureResult, GuestError> {
+        self.set_feature_with_transport_timeout(interface_number, timeout_ms, payload, timeout_ms)
+    }
+
+    pub fn set_feature_with_transport_timeout(
+        &mut self,
+        interface_number: u8,
+        timeout_ms: u16,
+        payload: &[u8],
+        transport_timeout_ms: u16,
+    ) -> Result<SetFeatureResult, GuestError> {
         let request = SetFeature {
             interface_number,
             timeout_ms,
             data: payload.to_vec(),
         };
-        self.control_request::<_, SetFeatureResult>(&request, timeout_ms)
+        self.control_request::<_, SetFeatureResult>(&request, transport_timeout_ms)
     }
 
     pub fn set_output(
@@ -350,12 +377,22 @@ impl GuestControl {
         timeout_ms: u16,
         payload: &[u8],
     ) -> Result<SetOutputResult, GuestError> {
+        self.set_output_with_transport_timeout(interface_number, timeout_ms, payload, timeout_ms)
+    }
+
+    pub fn set_output_with_transport_timeout(
+        &mut self,
+        interface_number: u8,
+        timeout_ms: u16,
+        payload: &[u8],
+        transport_timeout_ms: u16,
+    ) -> Result<SetOutputResult, GuestError> {
         let request = SetOutput {
             interface_number,
             timeout_ms,
             data: payload.to_vec(),
         };
-        self.control_request::<_, SetOutputResult>(&request, timeout_ms)
+        self.control_request::<_, SetOutputResult>(&request, transport_timeout_ms)
     }
 
     pub fn write_report(
@@ -364,15 +401,29 @@ impl GuestControl {
         timeout_ms: u16,
         payload: &[u8],
     ) -> Result<WriteResult, GuestError> {
+        self.write_report_with_transport_timeout(interface_number, timeout_ms, payload, timeout_ms)
+    }
+
+    pub fn write_report_with_transport_timeout(
+        &mut self,
+        interface_number: u8,
+        timeout_ms: u16,
+        payload: &[u8],
+        transport_timeout_ms: u16,
+    ) -> Result<WriteResult, GuestError> {
         let request = WriteReport {
             interface_number,
             timeout_ms,
             data: payload.to_vec(),
         };
-        self.control_request::<_, WriteResult>(&request, timeout_ms)
+        self.control_request::<_, WriteResult>(&request, transport_timeout_ms)
     }
 
-    fn control_request<T, R>(&mut self, request: &T, timeout_ms: u16) -> Result<R, GuestError>
+    fn control_request<T, R>(
+        &mut self,
+        request: &T,
+        transport_timeout_ms: u16,
+    ) -> Result<R, GuestError>
     where
         T: WirePayload,
         R: WirePayload,
@@ -380,8 +431,8 @@ impl GuestControl {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
 
-        if timeout_ms > 0 {
-            let timeout = Some(Duration::from_millis(u64::from(timeout_ms)));
+        if transport_timeout_ms > 0 {
+            let timeout = Some(Duration::from_millis(u64::from(transport_timeout_ms)));
             self.control.set_read_timeout(timeout)?;
             self.control.set_write_timeout(timeout)?;
         }

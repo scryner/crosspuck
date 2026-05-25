@@ -420,9 +420,10 @@ impl GuestDriverRuntime {
 
     fn bridge_healthy(&self) -> bool {
         self.bridge.lock().is_ok_and(|bridge| {
-            bridge
-                .as_ref()
-                .is_some_and(|bridge| bridge.input_stats().read_errors == 0)
+            bridge.as_ref().is_some_and(|bridge| {
+                let stats = bridge.input_stats();
+                stats.read_errors == 0 && stats.command_errors == 0
+            })
         })
     }
 }
