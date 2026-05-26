@@ -1,10 +1,8 @@
 use std::process::ExitCode;
 
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 mod bundle;
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 mod driver_install;
 #[cfg(target_os = "macos")]
 mod hid_backend;
@@ -26,6 +24,9 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use crate::driver_install::{
+        check_driver_install_status, install_driver, DriverInstallContext, DriverInstallStatus,
+    };
     use crate::runtime::{
         start_host_service_with_config, AppState, HostServiceConfig, HostServiceHandle,
     };
@@ -41,7 +42,11 @@ mod macos {
     use objc2_foundation::{
         NSAutoreleasePool, NSBundle, NSObject, NSObjectProtocol, NSString, NSTimer,
     };
+    use std::path::PathBuf;
     use std::process::ExitCode;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     struct MenuBarObjects {
         _status_item: Retained<NSStatusItem>,
@@ -50,6 +55,7 @@ mod macos {
         _state_items: StateMenuItems,
         _menu_delegate: Retained<StateMenuDelegate>,
         _refresh_timer: Retained<NSTimer>,
+        _driver_controller: Retained<DriverInstallController>,
         _quit_controller: Retained<QuitController>,
     }
 
@@ -59,11 +65,14 @@ mod macos {
         puck: Retained<NSMenuItem>,
         guest: Retained<NSMenuItem>,
         error: Retained<NSMenuItem>,
+        driver_status: Retained<NSMenuItem>,
+        driver_action: Retained<NSMenuItem>,
     }
 
     #[derive(Clone)]
     struct StateMenuDelegateIvars {
         app_state: AppState,
+        driver_state: Arc<DriverMenuState>,
         items: StateMenuItems,
     }
 
@@ -78,14 +87,24 @@ mod macos {
         unsafe impl NSMenuDelegate for StateMenuDelegate {
             #[unsafe(method(menuWillOpen:))]
             fn menu_will_open(&self, _menu: &NSMenu) {
-                refresh_state_items(&self.ivars().app_state, &self.ivars().items);
+                self.ivars().driver_state.refresh_status();
+                refresh_state_items(
+                    &self.ivars().app_state,
+                    &self.ivars().driver_state,
+                    &self.ivars().items,
+                );
             }
         }
 
         impl StateMenuDelegate {
             #[unsafe(method(refreshTimer:))]
             fn refresh_timer(&self, _timer: &NSTimer) {
-                refresh_state_items(&self.ivars().app_state, &self.ivars().items);
+                self.ivars().driver_state.refresh_status_throttled();
+                refresh_state_items(
+                    &self.ivars().app_state,
+                    &self.ivars().driver_state,
+                    &self.ivars().items,
+                );
             }
         }
     );
@@ -94,9 +113,51 @@ mod macos {
         fn new(
             mtm: MainThreadMarker,
             app_state: AppState,
+            driver_state: Arc<DriverMenuState>,
             items: StateMenuItems,
         ) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(StateMenuDelegateIvars { app_state, items });
+            let this = Self::alloc(mtm).set_ivars(StateMenuDelegateIvars {
+                app_state,
+                driver_state,
+                items,
+            });
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    struct DriverInstallControllerIvars {
+        driver_state: Arc<DriverMenuState>,
+        items: StateMenuItems,
+    }
+
+    define_class!(
+        #[unsafe(super = NSObject)]
+        #[thread_kind = objc2::MainThreadOnly]
+        #[ivars = DriverInstallControllerIvars]
+        struct DriverInstallController;
+
+        unsafe impl NSObjectProtocol for DriverInstallController {}
+
+        impl DriverInstallController {
+            #[unsafe(method(installDriver:))]
+            fn install_driver(&self, _sender: Option<&AnyObject>) {
+                if self.ivars().driver_state.start_install() {
+                    refresh_driver_items(&self.ivars().driver_state, &self.ivars().items);
+                }
+            }
+        }
+    );
+
+    impl DriverInstallController {
+        fn new(
+            mtm: MainThreadMarker,
+            driver_state: Arc<DriverMenuState>,
+            items: StateMenuItems,
+        ) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(DriverInstallControllerIvars {
+                driver_state,
+                items,
+            });
             unsafe { msg_send![super(this), init] }
         }
     }
@@ -192,6 +253,10 @@ mod macos {
 
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
+        let driver_state = Arc::new(DriverMenuState::new(
+            DriverInstallContext::from_environment(bundle_resources_dir()),
+        ));
+        driver_state.refresh_status();
 
         let empty_key = NSString::from_str("");
         let state_items = StateMenuItems {
@@ -215,15 +280,41 @@ mod macos {
                 None,
                 &empty_key,
             ),
+            driver_status: {
+                let separator = NSMenuItem::separatorItem(mtm);
+                menu.addItem(&separator);
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Driver: Checking..."),
+                    None,
+                    &empty_key,
+                )
+            },
+            driver_action: menu.addItemWithTitle_action_keyEquivalent(
+                &NSString::from_str("Install Steam Driver..."),
+                Some(sel!(installDriver:)),
+                &empty_key,
+            ),
         };
         state_items.status.setEnabled(false);
         state_items.puck.setEnabled(false);
         state_items.guest.setEnabled(false);
         state_items.error.setEnabled(false);
+        state_items.driver_status.setEnabled(false);
 
-        let menu_delegate = StateMenuDelegate::new(mtm, app_state.clone(), state_items.clone());
+        let driver_controller =
+            DriverInstallController::new(mtm, Arc::clone(&driver_state), state_items.clone());
+        state_items
+            .driver_action
+            .setTarget(Some(driver_controller.as_ref()));
+
+        let menu_delegate = StateMenuDelegate::new(
+            mtm,
+            app_state.clone(),
+            Arc::clone(&driver_state),
+            state_items.clone(),
+        );
         menu.setDelegate(Some(ProtocolObject::from_ref(&*menu_delegate)));
-        refresh_state_items(app_state, &state_items);
+        refresh_state_items(app_state, &driver_state, &state_items);
         let refresh_timer =
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
                 0.5,
@@ -252,11 +343,16 @@ mod macos {
             _state_items: state_items,
             _menu_delegate: menu_delegate,
             _refresh_timer: refresh_timer,
+            _driver_controller: driver_controller,
             _quit_controller: quit_controller,
         }
     }
 
-    fn refresh_state_items(app_state: &AppState, items: &StateMenuItems) {
+    fn refresh_state_items(
+        app_state: &AppState,
+        driver_state: &DriverMenuState,
+        items: &StateMenuItems,
+    ) {
         let view = app_state.snapshot().menu_view();
         items
             .status
@@ -270,6 +366,176 @@ mod macos {
         items
             .error
             .setTitle(&NSString::from_str(&format!("Last error: {}", view.error)));
+        refresh_driver_items(driver_state, items);
+    }
+
+    fn refresh_driver_items(driver_state: &DriverMenuState, items: &StateMenuItems) {
+        let view = driver_state.menu_view();
+        items
+            .driver_status
+            .setTitle(&NSString::from_str(&view.status_title));
+        items
+            .driver_action
+            .setTitle(&NSString::from_str(&view.action_title));
+        items.driver_action.setEnabled(view.action_enabled);
+    }
+
+    #[derive(Debug)]
+    struct DriverMenuState {
+        context: DriverInstallContext,
+        snapshot: Mutex<DriverMenuSnapshot>,
+        last_status_check: Mutex<Option<Instant>>,
+    }
+
+    #[derive(Clone, Debug)]
+    enum DriverMenuSnapshot {
+        Checking,
+        Installing,
+        Status(DriverInstallStatus),
+        InstallFailed { message: String },
+    }
+
+    #[derive(Clone, Debug)]
+    struct DriverMenuView {
+        status_title: String,
+        action_title: String,
+        action_enabled: bool,
+    }
+
+    impl DriverMenuState {
+        fn new(context: DriverInstallContext) -> Self {
+            Self {
+                context,
+                snapshot: Mutex::new(DriverMenuSnapshot::Checking),
+                last_status_check: Mutex::new(None),
+            }
+        }
+
+        fn refresh_status(&self) {
+            if self.is_installing() {
+                return;
+            }
+
+            let status = check_driver_install_status(&self.context);
+            if let Ok(mut snapshot) = self.snapshot.lock() {
+                *snapshot = DriverMenuSnapshot::Status(status);
+            }
+            if let Ok(mut last_status_check) = self.last_status_check.lock() {
+                *last_status_check = Some(Instant::now());
+            }
+        }
+
+        fn refresh_status_throttled(&self) {
+            const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+            if self.is_installing() {
+                return;
+            }
+            if self
+                .last_status_check
+                .lock()
+                .is_ok_and(|last| last.is_some_and(|last| last.elapsed() < STATUS_REFRESH_INTERVAL))
+            {
+                return;
+            }
+            self.refresh_status();
+        }
+
+        fn start_install(self: &Arc<Self>) -> bool {
+            let Ok(mut snapshot) = self.snapshot.lock() else {
+                return false;
+            };
+            if matches!(*snapshot, DriverMenuSnapshot::Installing) {
+                return false;
+            }
+            *snapshot = DriverMenuSnapshot::Installing;
+            drop(snapshot);
+
+            let state = Arc::clone(self);
+            let context = self.context.clone();
+            thread::spawn(move || {
+                let next = match install_driver(&context) {
+                    Ok(result) => {
+                        log::info!(
+                            "CrossPuck driver installed: target={} backup={} sha256={}",
+                            result.target_dll.display(),
+                            result
+                                .backup_path
+                                .as_ref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                            result.installed_sha256
+                        );
+                        DriverMenuSnapshot::Status(check_driver_install_status(&context))
+                    }
+                    Err(error) => {
+                        log::error!("CrossPuck driver install failed: {error}");
+                        DriverMenuSnapshot::InstallFailed {
+                            message: short_menu_message(&error.to_string()),
+                        }
+                    }
+                };
+
+                if let Ok(mut snapshot) = state.snapshot.lock() {
+                    *snapshot = next;
+                }
+            });
+            true
+        }
+
+        fn menu_view(&self) -> DriverMenuView {
+            let snapshot = self
+                .snapshot
+                .lock()
+                .map(|snapshot| snapshot.clone())
+                .unwrap_or(DriverMenuSnapshot::InstallFailed {
+                    message: "state lock poisoned".to_string(),
+                });
+            match snapshot {
+                DriverMenuSnapshot::Checking => DriverMenuView {
+                    status_title: "Driver: Checking...".to_string(),
+                    action_title: "Install Steam Driver...".to_string(),
+                    action_enabled: false,
+                },
+                DriverMenuSnapshot::Installing => DriverMenuView {
+                    status_title: "Driver: Installing...".to_string(),
+                    action_title: "Installing...".to_string(),
+                    action_enabled: false,
+                },
+                DriverMenuSnapshot::Status(status) => DriverMenuView {
+                    status_title: status.status_title,
+                    action_title: status.action_title,
+                    action_enabled: status.action_enabled,
+                },
+                DriverMenuSnapshot::InstallFailed { message } => DriverMenuView {
+                    status_title: format!("Driver: Install failed: {message}"),
+                    action_title: "Retry Steam Driver...".to_string(),
+                    action_enabled: true,
+                },
+            }
+        }
+
+        fn is_installing(&self) -> bool {
+            self.snapshot
+                .lock()
+                .is_ok_and(|snapshot| matches!(*snapshot, DriverMenuSnapshot::Installing))
+        }
+    }
+
+    fn short_menu_message(message: &str) -> String {
+        const MAX_LEN: usize = 96;
+        let trimmed = message.trim();
+        if trimmed.chars().count() <= MAX_LEN {
+            return trimmed.to_string();
+        }
+        let mut shortened = trimmed.chars().take(MAX_LEN).collect::<String>();
+        shortened.push_str("...");
+        shortened
+    }
+
+    unsafe fn bundle_resources_dir() -> Option<PathBuf> {
+        NSBundle::mainBundle()
+            .resourcePath()
+            .map(|path| PathBuf::from(path.to_string()))
     }
 
     unsafe fn load_status_icon() -> Option<Retained<NSImage>> {

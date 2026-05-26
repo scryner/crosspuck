@@ -64,10 +64,6 @@ impl EmbeddedDriver {
         Self::from_guest_driver_dir(guest_driver_dir)
     }
 
-    pub fn from_bundle_dir(bundle_dir: impl AsRef<Path>) -> Result<Self, BundleError> {
-        Self::from_resources_dir(bundle_dir.as_ref().join("Contents").join("Resources"))
-    }
-
     pub fn from_guest_driver_dir(guest_driver_dir: impl AsRef<Path>) -> Result<Self, BundleError> {
         let guest_driver_dir = guest_driver_dir.as_ref();
         let manifest_path = guest_driver_dir.join(DRIVER_MANIFEST_NAME);
