@@ -8,25 +8,25 @@ used while developing and validating CrossPuck.
 Install the production guest driver next to `Steam.exe`:
 
 ```sh
-tools/crossover/install-driver.sh --bottle Steam
+tools/crosspuck/install-driver.sh --bottle Steam
 ```
 
 Useful options:
 
 ```sh
-tools/crossover/install-driver.sh \
+tools/crosspuck/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
-  --log-level info \
-  --trace 0 \
-  --required 1
+  --no-build
 ```
 
-The script copies `hid.dll`, backs up any existing app-local `hid.dll`, creates
-`crosspuck-driver-env.reg` in the bottle root, and initializes
-`crosspuck-driver.log` next to Steam. The generated registry file removes any
-older global `CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS` override so the driver uses
-its operation-specific low-latency defaults.
+The script copies `hid.dll`, backs up any existing app-local `hid.dll`, and
+initializes `crosspuck-driver.log` next to Steam. It does not write guest
+runtime `CROSSPUCK_*` registry or environment settings.
+
+If CrossOver needs an explicit loader override for the app-local `hid.dll`, run
+with `--write-wine-override` and import the generated loader-only registry file.
+This only sets `hid=native,builtin`; runtime settings remain host-owned.
 
 Do not copy this DLL into `drive_c/windows/system32`. The driver is intended to
 be app-local and forwards non-virtual HID calls to the real system HID DLL.
@@ -37,6 +37,7 @@ Host app logs use macOS Unified Logging.
 
 ```sh
 open -a CrossPuck --args --log-level debug
+open -a CrossPuck --args --override-log-level --log-level debug
 CROSSPUCK_LOG_LEVEL=debug CrossPuck
 ```
 
@@ -44,19 +45,13 @@ Supported host levels are `off`, `error`, `warn`, `info`, `debug`, and `trace`.
 The default is `info`.
 
 Guest driver logs are written to `crosspuck-driver.log` next to Steam. The
-guest log level is configured through `CROSSPUCK_LOG_LEVEL`, usually via the
-generated registry file. The default is `info`.
+guest default level is `info`. To override guest severity for a host session,
+start the host with `--override-log-level --log-level <level>`.
 
 - `info`: attach and bridge connection state.
 - `error`: hook/bridge/virtual HID failures.
 - `debug`: hook, discovery, and API-level diagnostic logs.
-- `trace`: payload traces, gated together with `CROSSPUCK_TRACE_REPORTS`.
-
-For payload-level smoke testing:
-
-```sh
-tools/crossover/install-driver.sh --bottle Steam --log-level trace --trace 1
-```
+- `trace`: payload traces when enabled by host-owned diagnostic configuration.
 
 ## Smoke Test
 
@@ -68,12 +63,12 @@ The detailed CrossOver smoke procedure is documented here:
 After exercising the Steam UI, run:
 
 ```sh
-tools/crossover/smoke-check.sh --bottle Steam
+tools/crosspuck/smoke-check.sh --bottle Steam
 ```
 
 Warnings from this script are hints, not hard failures. Missing trace markers
-usually mean the corresponding Steam UI path was not exercised or debug/trace
-logging was not enabled.
+usually mean the corresponding Steam UI path was not exercised, the host app was
+not running, or debug/trace logging was not enabled.
 
 ## Development Checks
 

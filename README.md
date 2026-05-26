@@ -32,13 +32,13 @@ rustup target add x86_64-pc-windows-gnu
 Build a debug app bundle:
 
 ```sh
-crates/crosspuck-app/scripts/bundle-app.sh debug
+tools/crosspuck/build-app.sh debug
 ```
 
 Build a release app bundle:
 
 ```sh
-crates/crosspuck-app/scripts/bundle-app.sh release
+tools/crosspuck/build-app.sh release
 ```
 
 The script prints the generated bundle path, for example:
@@ -68,38 +68,35 @@ target/x86_64-pc-windows-gnu/release/hid.dll
 Install the driver next to `Steam.exe` in the target bottle:
 
 ```sh
-tools/crossover/install-driver.sh --bottle Steam
+tools/crosspuck/install-driver.sh --bottle Steam
 ```
 
 Useful options:
 
 ```sh
-tools/crossover/install-driver.sh \
+tools/crosspuck/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
-  --log-level info \
-  --trace 0 \
-  --required 1
+  --no-build
 ```
 
-The script copies `hid.dll`, backs up any existing local `hid.dll`, creates a
-`crosspuck-driver-env.reg` file, and initializes `crosspuck-driver.log`.
+The script copies `hid.dll`, backs up any existing local `hid.dll`, and
+initializes `crosspuck-driver.log`. It does not write guest runtime
+`CROSSPUCK_*` registry or environment settings; guest runtime settings come
+from built-in defaults and host connection overrides.
 
 Do not install this DLL into `drive_c/windows/system32`. It is designed to live
 next to Steam and forward non-virtual HID calls to the real system HID DLL.
 
-After installation, import the generated registry file into the same CrossOver
-bottle when you want explicit Wine DLL override and environment settings:
+If CrossOver needs an explicit loader override for the app-local `hid.dll`, ask
+the installer to write a loader-only registry file:
 
-```text
-<Bottle>/crosspuck-driver-env.reg
+```sh
+tools/crosspuck/install-driver.sh --bottle Steam --write-wine-override
 ```
 
-The driver has safe built-in defaults, so it can run with only the DLL present
-as long as the host app is already running. Importing the registry remains
-recommended for smoke testing and explicit configuration. The generated
-registry file removes any older global `CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS`
-override so the driver can use its built-in operation-specific timeouts.
+That file only sets Wine's `hid=native,builtin` DLL override. It does not set
+guest runtime options.
 
 ## Tools And Diagnostics
 
