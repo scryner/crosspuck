@@ -1,8 +1,9 @@
 use crate::protocol::{
     Channel, FeatureResult, Frame, FrameIoError, GetFeature, Hello, HelloOk, IdentityPayload,
-    InputAttach, InputAttachOk, InputQueueStats, InputReport, InputReportQueue, MessageType,
-    ProtocolError, QueuedInputReport, SetFeature, SetFeatureResult, SetOutput, SetOutputResult,
-    StatusCode, WireDecode, WirePayload, WriteReport, WriteResult, PROTOCOL_VERSION,
+    InputAttach, InputAttachOk, InputQueueStats, InputReport, InputReportQueue, LogSeverity,
+    MessageType, ProtocolError, QueuedInputReport, SetFeature, SetFeatureResult, SetOutput,
+    SetOutputResult, StatusCode, WireDecode, WirePayload, WriteReport, WriteResult,
+    PROTOCOL_VERSION,
 };
 use crate::transport::{ChannelStream, TransportAddrs, TransportError};
 use std::fmt;
@@ -99,6 +100,7 @@ impl GuestTransportClient {
         )?;
         let session_id = hello_ok.session_id;
         let session_trace_id = hello_ok.session_trace_id;
+        let guest_log_level_override = hello_ok.guest_log_level_override;
 
         let mut input = at_stage(
             "input connect",
@@ -184,6 +186,7 @@ impl GuestTransportClient {
                 identity,
                 session_id,
                 session_trace_id,
+                guest_log_level_override,
                 guest_label: config.guest_label,
             },
             control: GuestControl {
@@ -210,6 +213,7 @@ pub struct GuestSessionInfo {
     pub identity: IdentityPayload,
     pub session_id: u32,
     pub session_trace_id: u32,
+    pub guest_log_level_override: Option<LogSeverity>,
     pub guest_label: String,
 }
 
@@ -230,6 +234,10 @@ impl GuestSession {
 
     pub fn session_trace_id(&self) -> u32 {
         self.info.session_trace_id
+    }
+
+    pub fn guest_log_level_override(&self) -> Option<LogSeverity> {
+        self.info.guest_log_level_override
     }
 
     pub fn guest_label(&self) -> &str {
@@ -652,7 +660,12 @@ mod tests {
             write_payload(
                 &mut control,
                 hello.header.id,
-                &HelloOk::success(0xAABB_CCDD, 54),
+                &HelloOk::success_with_trace_and_log_level(
+                    0xAABB_CCDD,
+                    0x12345,
+                    54,
+                    Some(crate::protocol::LogSeverity::Trace),
+                ),
             )
             .unwrap();
             write_payload(&mut control, 0, &identity()).unwrap();
@@ -754,6 +767,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(session.identity().serial, "FXB9961303C9C");
+        assert_eq!(session.session_trace_id(), 0x12345);
+        assert_eq!(
+            session.guest_log_level_override(),
+            Some(crate::protocol::LogSeverity::Trace)
+        );
         let report = session.read_input_report().unwrap();
         assert_eq!(report.sequence, 1);
         assert_eq!(report.data, vec![0x79, 0x02]);

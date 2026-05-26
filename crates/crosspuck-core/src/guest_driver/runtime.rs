@@ -4,6 +4,7 @@ use super::handles::{VirtualHandleId, VirtualHandleTable};
 use super::identity::{RuntimeIdentity, RuntimeIdentityState};
 use super::profile::{VirtualHidProfile, VirtualHidProfileCatalog};
 use super::trace::TraceLimiter;
+use crate::protocol::LogSeverity;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -90,6 +91,14 @@ impl GuestDriverRuntime {
             .lock()
             .ok()
             .and_then(|bridge| bridge.as_ref().map(|bridge| bridge.info().session_trace_id))
+    }
+
+    pub fn guest_log_level_override(&self) -> Option<LogSeverity> {
+        self.bridge.lock().ok().and_then(|bridge| {
+            bridge
+                .as_ref()
+                .and_then(|bridge| bridge.info().guest_log_level_override)
+        })
     }
 
     pub fn catalog_if_connected(&self) -> Option<VirtualHidProfileCatalog> {

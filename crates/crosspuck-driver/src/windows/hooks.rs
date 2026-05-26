@@ -1,4 +1,4 @@
-use super::{kernel32, sdl, setupapi};
+use super::{kernel32, log::debug_line, sdl, setupapi};
 use min_hook_rs::{create_hook_api, enable_hook, initialize};
 use std::ffi::c_void;
 
@@ -106,7 +106,8 @@ pub fn install() -> Result<(), String> {
         setupapi::detoured_setupdi_get_device_property_w as *mut c_void,
         setupapi::set_original_setupdi_get_device_property_w,
     )?;
-    install_sdl_hooks();
+    install_sdl_hidapi_hooks();
+    debug_line("[crosspuck] hook groups installed core_hid=true setupapi=true sdl_hidapi=true");
     Ok(())
 }
 
@@ -144,7 +145,7 @@ fn install_optional_hook(
     sdl::log_optional_hook_installed(module, proc_name);
 }
 
-fn install_sdl_hooks() {
+fn install_sdl_hidapi_hooks() {
     sdl::load_sdl3();
     install_optional_hook(
         "SDL3.dll",

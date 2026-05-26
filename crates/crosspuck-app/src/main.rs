@@ -20,7 +20,9 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use crate::runtime::{start_host_service, AppState, HostServiceHandle};
+    use crate::runtime::{
+        start_host_service_with_config, AppState, HostServiceConfig, HostServiceHandle,
+    };
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject};
     use objc2::{
@@ -144,7 +146,12 @@ mod macos {
             app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
             let app_state = AppState::new();
-            let service_handle = start_host_service(app_state.clone());
+            let service_handle = start_host_service_with_config(
+                app_state.clone(),
+                HostServiceConfig {
+                    guest_log_level_override: logging_config.guest_log_level_override(),
+                },
+            );
             log::info!("CrossPuck host app started");
             let menu_objects = build_menu_bar(app.clone(), mtm, &app_state, service_handle);
             Box::leak(Box::new(menu_objects));

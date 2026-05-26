@@ -5,9 +5,54 @@ use super::{MessageType, CONTROL_PAYLOAD_LIMIT, INPUT_PAYLOAD_LIMIT, PROTOCOL_VE
 pub const DEFAULT_GUEST_CAPABILITIES: u32 = 0;
 pub const DEFAULT_INPUT_QUEUE_CAPACITY: usize = 64;
 pub const SESSION_TRACE_ID_MASK: u32 = 0x000F_FFFF;
+const LOG_SEVERITY_NO_OVERRIDE: u8 = 0xFF;
 
 pub fn session_trace_label(session_trace_id: u32) -> String {
     format!("{:05x}", session_trace_id & SESSION_TRACE_ID_MASK)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[repr(u8)]
+pub enum LogSeverity {
+    Off = 0,
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
+}
+
+impl LogSeverity {
+    pub fn id(self) -> u8 {
+        self as u8
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
+impl TryFrom<u8> for LogSeverity {
+    type Error = ProtocolError;
+
+    fn try_from(value: u8) -> Result<Self, ProtocolError> {
+        match value {
+            0 => Ok(Self::Off),
+            1 => Ok(Self::Error),
+            2 => Ok(Self::Warn),
+            3 => Ok(Self::Info),
+            4 => Ok(Self::Debug),
+            5 => Ok(Self::Trace),
+            other => Err(ProtocolError::InvalidLogSeverity(other)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,6 +109,7 @@ pub struct HelloOk {
     pub protocol_version: u16,
     pub session_id: u32,
     pub session_trace_id: u32,
+    pub guest_log_level_override: Option<LogSeverity>,
     pub control_payload_limit: u16,
     pub input_payload_limit: u16,
     pub default_input_report_len: u16,
@@ -79,11 +125,26 @@ impl HelloOk {
         session_trace_id: u32,
         default_input_report_len: u16,
     ) -> Self {
+        Self::success_with_trace_and_log_level(
+            session_id,
+            session_trace_id,
+            default_input_report_len,
+            None,
+        )
+    }
+
+    pub fn success_with_trace_and_log_level(
+        session_id: u32,
+        session_trace_id: u32,
+        default_input_report_len: u16,
+        guest_log_level_override: Option<LogSeverity>,
+    ) -> Self {
         Self {
             status: StatusCode::Ok,
             protocol_version: PROTOCOL_VERSION as u16,
             session_id,
             session_trace_id: session_trace_id & SESSION_TRACE_ID_MASK,
+            guest_log_level_override,
             control_payload_limit: CONTROL_PAYLOAD_LIMIT as u16,
             input_payload_limit: INPUT_PAYLOAD_LIMIT as u16,
             default_input_report_len,
@@ -102,6 +163,14 @@ impl WireEncode for HelloOk {
         encoder.u16(self.default_input_report_len);
         encoder.u16(0);
         encoder.u32(self.session_trace_id & SESSION_TRACE_ID_MASK);
+        if self.guest_log_level_override.is_some() {
+            encoder.u8(self
+                .guest_log_level_override
+                .map(LogSeverity::id)
+                .unwrap_or(LOG_SEVERITY_NO_OVERRIDE));
+            encoder.u8(0);
+            encoder.u16(0);
+        }
         Ok(())
     }
 }
@@ -114,6 +183,7 @@ impl WireDecode for HelloOk {
             protocol_version: decoder.u16("protocol_version")?,
             session_id: decoder.u32("session_id")?,
             session_trace_id: 0,
+            guest_log_level_override: None,
             control_payload_limit: decoder.u16("control_payload_limit")?,
             input_payload_limit: decoder.u16("input_payload_limit")?,
             default_input_report_len: decoder.u16("default_input_report_len")?,
@@ -122,6 +192,17 @@ impl WireDecode for HelloOk {
         let mut value = value;
         if decoder.remaining() > 0 {
             value.session_trace_id = decoder.u32("session_trace_id")? & SESSION_TRACE_ID_MASK;
+        }
+        if decoder.remaining() > 0 {
+            let raw_log_level = decoder.u8("guest_log_level_override")?;
+            if raw_log_level != LOG_SEVERITY_NO_OVERRIDE {
+                value.guest_log_level_override = Some(LogSeverity::try_from(raw_log_level)?);
+            }
+            decoder.reserved_u8("hello_ok.guest_log_level_reserved_zero")?;
+            decoder.reserved_u16("hello_ok.guest_log_level_reserved_zero")?;
+        }
+        if decoder.remaining() > 0 {
+            let _ = decoder.u32("legacy_guest_diagnostic_hooks")?;
         }
         decoder.finish()?;
         Ok(value)
@@ -846,7 +927,41 @@ mod tests {
 
         assert_eq!(decoded.session_id, 0xAABB_CCDD);
         assert_eq!(decoded.session_trace_id, 0x2_3456);
+        assert_eq!(decoded.guest_log_level_override, None);
         assert_eq!(session_trace_label(decoded.session_trace_id), "23456");
+    }
+
+    #[test]
+    fn hello_ok_round_trips_guest_log_level_override() {
+        let hello_ok = HelloOk::success_with_trace_and_log_level(
+            0xAABB_CCDD,
+            0x12_3456,
+            54,
+            Some(LogSeverity::Debug),
+        );
+        let decoded = HelloOk::decode(&hello_ok.to_bytes().unwrap()).unwrap();
+
+        assert_eq!(decoded.session_id, 0xAABB_CCDD);
+        assert_eq!(decoded.session_trace_id, 0x2_3456);
+        assert_eq!(decoded.guest_log_level_override, Some(LogSeverity::Debug));
+    }
+
+    #[test]
+    fn hello_ok_ignores_legacy_guest_diagnostic_hooks() {
+        let mut payload = HelloOk::success_with_trace_and_log_level(
+            0xAABB_CCDD,
+            0x12_3456,
+            54,
+            Some(LogSeverity::Trace),
+        )
+        .to_bytes()
+        .unwrap();
+        payload.extend_from_slice(&0x0000_0007_u32.to_le_bytes());
+        let decoded = HelloOk::decode(&payload).unwrap();
+
+        assert_eq!(decoded.session_id, 0xAABB_CCDD);
+        assert_eq!(decoded.session_trace_id, 0x2_3456);
+        assert_eq!(decoded.guest_log_level_override, Some(LogSeverity::Trace));
     }
 
     #[test]
@@ -865,6 +980,7 @@ mod tests {
 
         assert_eq!(decoded.session_id, 0xAABB_CCDD);
         assert_eq!(decoded.session_trace_id, 0);
+        assert_eq!(decoded.guest_log_level_override, None);
     }
 
     #[test]

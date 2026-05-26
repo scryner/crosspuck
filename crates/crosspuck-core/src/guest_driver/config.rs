@@ -1,3 +1,4 @@
+use crate::protocol::LogSeverity;
 use crate::transport::TransportAddrs;
 use std::env;
 use std::time::Duration;
@@ -48,6 +49,19 @@ impl GuestLogLevel {
 
     pub fn allows(self, level: Self) -> bool {
         level != Self::Off && self >= level
+    }
+}
+
+impl From<LogSeverity> for GuestLogLevel {
+    fn from(value: LogSeverity) -> Self {
+        match value {
+            LogSeverity::Off => Self::Off,
+            LogSeverity::Error => Self::Error,
+            LogSeverity::Warn => Self::Warn,
+            LogSeverity::Info => Self::Info,
+            LogSeverity::Debug => Self::Debug,
+            LogSeverity::Trace => Self::Trace,
+        }
     }
 }
 

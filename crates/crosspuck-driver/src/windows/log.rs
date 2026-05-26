@@ -8,11 +8,17 @@ use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
 
 static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
-static LOG_LEVEL: OnceLock<GuestLogLevel> = OnceLock::new();
+static LOG_LEVEL: OnceLock<Mutex<GuestLogLevel>> = OnceLock::new();
 static SESSION_TRACE_ID: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 
 pub fn set_log_level(level: GuestLogLevel) {
-    let _ = LOG_LEVEL.set(level);
+    let Ok(mut guard) = LOG_LEVEL
+        .get_or_init(|| Mutex::new(crosspuck_core::guest_driver::config::DEFAULT_LOG_LEVEL))
+        .lock()
+    else {
+        return;
+    };
+    *guard = level;
 }
 
 pub fn set_session_trace_id(session_trace_id: Option<u32>) {
@@ -38,6 +44,10 @@ pub fn trace_line(message: &str) {
     write_line(GuestLogLevel::Trace, message);
 }
 
+pub fn log_enabled(level: GuestLogLevel) -> bool {
+    current_log_level().allows(level)
+}
+
 fn write_line(level: GuestLogLevel, message: &str) {
     if !current_log_level().allows(level) {
         return;
@@ -54,8 +64,9 @@ fn write_line(level: GuestLogLevel, message: &str) {
 
 fn current_log_level() -> GuestLogLevel {
     LOG_LEVEL
-        .get()
-        .copied()
+        .get_or_init(|| Mutex::new(crosspuck_core::guest_driver::config::DEFAULT_LOG_LEVEL))
+        .lock()
+        .map(|guard| *guard)
         .unwrap_or(crosspuck_core::guest_driver::config::DEFAULT_LOG_LEVEL)
 }
 
