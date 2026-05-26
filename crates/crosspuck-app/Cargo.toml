@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 crosspuck-core.workspace = true
 log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

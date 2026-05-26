@@ -1,6 +1,12 @@
 use std::process::ExitCode;
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
+mod bundle;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+mod driver_install;
+#[cfg(target_os = "macos")]
 mod hid_backend;
 #[cfg(target_os = "macos")]
 mod logging;
