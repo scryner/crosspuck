@@ -35,7 +35,7 @@ pub unsafe extern "system" fn DllMain(
 }
 
 fn attach() {
-    let config = RuntimeConfig::driver_from_env();
+    let config = RuntimeConfig::driver_defaults();
     set_log_level(config.log_level);
     let host_bridge_enabled = config.host_bridge_enabled;
     let host_bridge_required = config.host_bridge_required;

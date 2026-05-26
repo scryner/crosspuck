@@ -6,6 +6,23 @@ pub const DEFAULT_GUEST_CAPABILITIES: u32 = 0;
 pub const DEFAULT_INPUT_QUEUE_CAPACITY: usize = 64;
 pub const SESSION_TRACE_ID_MASK: u32 = 0x000F_FFFF;
 const LOG_SEVERITY_NO_OVERRIDE: u8 = 0xFF;
+const GUEST_RUNTIME_OVERRIDES_MAGIC: u32 = u32::from_le_bytes(*b"CPG1");
+const GUEST_OVERRIDE_TRACE_REPORTS: u32 = 1 << 0;
+const GUEST_OVERRIDE_TRACE_REPORT_LIMIT: u32 = 1 << 1;
+const GUEST_OVERRIDE_TRACE_REPORT_MAX_BYTES: u32 = 1 << 2;
+const GUEST_OVERRIDE_IO_TIMEOUT_MS: u32 = 1 << 3;
+const GUEST_OVERRIDE_RECONNECT_INTERVAL_MS: u32 = 1 << 4;
+const GUEST_OVERRIDE_INPUT_QUEUE_CAPACITY: u32 = 1 << 5;
+const GUEST_OVERRIDE_REPLAY_ENABLED: u32 = 1 << 6;
+const GUEST_OVERRIDE_DIAGNOSTIC_HOOK_GROUPS: u32 = 1 << 7;
+const GUEST_OVERRIDE_KNOWN_FLAGS: u32 = GUEST_OVERRIDE_TRACE_REPORTS
+    | GUEST_OVERRIDE_TRACE_REPORT_LIMIT
+    | GUEST_OVERRIDE_TRACE_REPORT_MAX_BYTES
+    | GUEST_OVERRIDE_IO_TIMEOUT_MS
+    | GUEST_OVERRIDE_RECONNECT_INTERVAL_MS
+    | GUEST_OVERRIDE_INPUT_QUEUE_CAPACITY
+    | GUEST_OVERRIDE_REPLAY_ENABLED
+    | GUEST_OVERRIDE_DIAGNOSTIC_HOOK_GROUPS;
 
 pub fn session_trace_label(session_trace_id: u32) -> String {
     format!("{:05x}", session_trace_id & SESSION_TRACE_ID_MASK)
@@ -52,6 +69,190 @@ impl TryFrom<u8> for LogSeverity {
             5 => Ok(Self::Trace),
             other => Err(ProtocolError::InvalidLogSeverity(other)),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DiagnosticHookGroups {
+    bits: u32,
+}
+
+impl DiagnosticHookGroups {
+    pub fn from_bits(bits: u32) -> Self {
+        Self { bits }
+    }
+
+    pub fn bits(self) -> u32 {
+        self.bits
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GuestRuntimeOverrides {
+    pub log_level: Option<LogSeverity>,
+    pub trace_reports: Option<bool>,
+    pub trace_report_limit: Option<u32>,
+    pub trace_report_max_bytes: Option<u16>,
+    pub io_timeout_ms: Option<u32>,
+    pub reconnect_interval_ms: Option<u32>,
+    pub input_queue_capacity: Option<u16>,
+    pub replay_enabled: Option<bool>,
+    pub diagnostic_hook_groups: Option<DiagnosticHookGroups>,
+}
+
+impl GuestRuntimeOverrides {
+    pub fn with_log_level(log_level: Option<LogSeverity>) -> Self {
+        Self {
+            log_level,
+            ..Self::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.log_level.is_none()
+            && self.trace_reports.is_none()
+            && self.trace_report_limit.is_none()
+            && self.trace_report_max_bytes.is_none()
+            && self.io_timeout_ms.is_none()
+            && self.reconnect_interval_ms.is_none()
+            && self.input_queue_capacity.is_none()
+            && self.replay_enabled.is_none()
+            && self.diagnostic_hook_groups.is_none()
+    }
+
+    fn has_extended_block(&self) -> bool {
+        self.trace_reports.is_some()
+            || self.trace_report_limit.is_some()
+            || self.trace_report_max_bytes.is_some()
+            || self.io_timeout_ms.is_some()
+            || self.reconnect_interval_ms.is_some()
+            || self.input_queue_capacity.is_some()
+            || self.replay_enabled.is_some()
+            || self.diagnostic_hook_groups.is_some()
+    }
+
+    fn flags(&self) -> u32 {
+        let mut flags = 0_u32;
+        if self.trace_reports.is_some() {
+            flags |= GUEST_OVERRIDE_TRACE_REPORTS;
+        }
+        if self.trace_report_limit.is_some() {
+            flags |= GUEST_OVERRIDE_TRACE_REPORT_LIMIT;
+        }
+        if self.trace_report_max_bytes.is_some() {
+            flags |= GUEST_OVERRIDE_TRACE_REPORT_MAX_BYTES;
+        }
+        if self.io_timeout_ms.is_some() {
+            flags |= GUEST_OVERRIDE_IO_TIMEOUT_MS;
+        }
+        if self.reconnect_interval_ms.is_some() {
+            flags |= GUEST_OVERRIDE_RECONNECT_INTERVAL_MS;
+        }
+        if self.input_queue_capacity.is_some() {
+            flags |= GUEST_OVERRIDE_INPUT_QUEUE_CAPACITY;
+        }
+        if self.replay_enabled.is_some() {
+            flags |= GUEST_OVERRIDE_REPLAY_ENABLED;
+        }
+        if self.diagnostic_hook_groups.is_some() {
+            flags |= GUEST_OVERRIDE_DIAGNOSTIC_HOOK_GROUPS;
+        }
+        flags
+    }
+
+    fn encode_extended_block(&self, encoder: &mut Encoder<'_>) {
+        if !self.has_extended_block() {
+            return;
+        }
+
+        let flags = self.flags();
+        encoder.u32(GUEST_RUNTIME_OVERRIDES_MAGIC);
+        encoder.u32(flags);
+        if let Some(value) = self.trace_reports {
+            encode_bool(encoder, value);
+        }
+        if let Some(value) = self.trace_report_limit {
+            encoder.u32(value);
+        }
+        if let Some(value) = self.trace_report_max_bytes {
+            encoder.u16(value);
+        }
+        if let Some(value) = self.io_timeout_ms {
+            encoder.u32(value);
+        }
+        if let Some(value) = self.reconnect_interval_ms {
+            encoder.u32(value);
+        }
+        if let Some(value) = self.input_queue_capacity {
+            encoder.u16(value);
+        }
+        if let Some(value) = self.replay_enabled {
+            encode_bool(encoder, value);
+        }
+        if let Some(value) = self.diagnostic_hook_groups {
+            encoder.u32(value.bits());
+        }
+    }
+
+    fn decode_extended_block(decoder: &mut Decoder<'_>) -> Result<Self, ProtocolError> {
+        let magic = decoder.u32("guest_runtime_overrides.magic")?;
+        if magic != GUEST_RUNTIME_OVERRIDES_MAGIC {
+            return Err(ProtocolError::InvalidReserved(
+                "guest_runtime_overrides.magic",
+            ));
+        }
+        let flags = decoder.u32("guest_runtime_overrides.flags")?;
+        if flags & !GUEST_OVERRIDE_KNOWN_FLAGS != 0 {
+            return Err(ProtocolError::InvalidReserved(
+                "guest_runtime_overrides.flags",
+            ));
+        }
+
+        let mut overrides = Self::default();
+        if flags & GUEST_OVERRIDE_TRACE_REPORTS != 0 {
+            overrides.trace_reports = Some(decode_bool(decoder, "guest_runtime_overrides.trace")?);
+        }
+        if flags & GUEST_OVERRIDE_TRACE_REPORT_LIMIT != 0 {
+            overrides.trace_report_limit =
+                Some(decoder.u32("guest_runtime_overrides.trace_report_limit")?);
+        }
+        if flags & GUEST_OVERRIDE_TRACE_REPORT_MAX_BYTES != 0 {
+            overrides.trace_report_max_bytes =
+                Some(decoder.u16("guest_runtime_overrides.trace_report_max_bytes")?);
+        }
+        if flags & GUEST_OVERRIDE_IO_TIMEOUT_MS != 0 {
+            overrides.io_timeout_ms = Some(decoder.u32("guest_runtime_overrides.io_timeout_ms")?);
+        }
+        if flags & GUEST_OVERRIDE_RECONNECT_INTERVAL_MS != 0 {
+            overrides.reconnect_interval_ms =
+                Some(decoder.u32("guest_runtime_overrides.reconnect_interval_ms")?);
+        }
+        if flags & GUEST_OVERRIDE_INPUT_QUEUE_CAPACITY != 0 {
+            overrides.input_queue_capacity =
+                Some(decoder.u16("guest_runtime_overrides.input_queue_capacity")?);
+        }
+        if flags & GUEST_OVERRIDE_REPLAY_ENABLED != 0 {
+            overrides.replay_enabled =
+                Some(decode_bool(decoder, "guest_runtime_overrides.replay")?);
+        }
+        if flags & GUEST_OVERRIDE_DIAGNOSTIC_HOOK_GROUPS != 0 {
+            overrides.diagnostic_hook_groups = Some(DiagnosticHookGroups::from_bits(
+                decoder.u32("guest_runtime_overrides.diagnostic_hook_groups")?,
+            ));
+        }
+        Ok(overrides)
+    }
+}
+
+fn encode_bool(encoder: &mut Encoder<'_>, value: bool) {
+    encoder.u8(u8::from(value));
+}
+
+fn decode_bool(decoder: &mut Decoder<'_>, field: &'static str) -> Result<bool, ProtocolError> {
+    match decoder.u8(field)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(ProtocolError::InvalidReserved(field)),
     }
 }
 
@@ -109,7 +310,7 @@ pub struct HelloOk {
     pub protocol_version: u16,
     pub session_id: u32,
     pub session_trace_id: u32,
-    pub guest_log_level_override: Option<LogSeverity>,
+    pub guest_runtime_overrides: GuestRuntimeOverrides,
     pub control_payload_limit: u16,
     pub input_payload_limit: u16,
     pub default_input_report_len: u16,
@@ -139,12 +340,26 @@ impl HelloOk {
         default_input_report_len: u16,
         guest_log_level_override: Option<LogSeverity>,
     ) -> Self {
+        Self::success_with_trace_and_overrides(
+            session_id,
+            session_trace_id,
+            default_input_report_len,
+            GuestRuntimeOverrides::with_log_level(guest_log_level_override),
+        )
+    }
+
+    pub fn success_with_trace_and_overrides(
+        session_id: u32,
+        session_trace_id: u32,
+        default_input_report_len: u16,
+        guest_runtime_overrides: GuestRuntimeOverrides,
+    ) -> Self {
         Self {
             status: StatusCode::Ok,
             protocol_version: PROTOCOL_VERSION as u16,
             session_id,
             session_trace_id: session_trace_id & SESSION_TRACE_ID_MASK,
-            guest_log_level_override,
+            guest_runtime_overrides,
             control_payload_limit: CONTROL_PAYLOAD_LIMIT as u16,
             input_payload_limit: INPUT_PAYLOAD_LIMIT as u16,
             default_input_report_len,
@@ -163,13 +378,16 @@ impl WireEncode for HelloOk {
         encoder.u16(self.default_input_report_len);
         encoder.u16(0);
         encoder.u32(self.session_trace_id & SESSION_TRACE_ID_MASK);
-        if self.guest_log_level_override.is_some() {
+        if !self.guest_runtime_overrides.is_empty() {
             encoder.u8(self
-                .guest_log_level_override
+                .guest_runtime_overrides
+                .log_level
                 .map(LogSeverity::id)
                 .unwrap_or(LOG_SEVERITY_NO_OVERRIDE));
             encoder.u8(0);
             encoder.u16(0);
+            self.guest_runtime_overrides
+                .encode_extended_block(&mut encoder);
         }
         Ok(())
     }
@@ -183,7 +401,7 @@ impl WireDecode for HelloOk {
             protocol_version: decoder.u16("protocol_version")?,
             session_id: decoder.u32("session_id")?,
             session_trace_id: 0,
-            guest_log_level_override: None,
+            guest_runtime_overrides: GuestRuntimeOverrides::default(),
             control_payload_limit: decoder.u16("control_payload_limit")?,
             input_payload_limit: decoder.u16("input_payload_limit")?,
             default_input_report_len: decoder.u16("default_input_report_len")?,
@@ -196,13 +414,32 @@ impl WireDecode for HelloOk {
         if decoder.remaining() > 0 {
             let raw_log_level = decoder.u8("guest_log_level_override")?;
             if raw_log_level != LOG_SEVERITY_NO_OVERRIDE {
-                value.guest_log_level_override = Some(LogSeverity::try_from(raw_log_level)?);
+                value.guest_runtime_overrides.log_level =
+                    Some(LogSeverity::try_from(raw_log_level)?);
             }
             decoder.reserved_u8("hello_ok.guest_log_level_reserved_zero")?;
             decoder.reserved_u16("hello_ok.guest_log_level_reserved_zero")?;
         }
         if decoder.remaining() > 0 {
-            let _ = decoder.u32("legacy_guest_diagnostic_hooks")?;
+            if decoder.remaining() == 4 {
+                let _ = decoder.u32("legacy_guest_diagnostic_hooks")?;
+            } else {
+                let extended_overrides =
+                    GuestRuntimeOverrides::decode_extended_block(&mut decoder)?;
+                value.guest_runtime_overrides.trace_reports = extended_overrides.trace_reports;
+                value.guest_runtime_overrides.trace_report_limit =
+                    extended_overrides.trace_report_limit;
+                value.guest_runtime_overrides.trace_report_max_bytes =
+                    extended_overrides.trace_report_max_bytes;
+                value.guest_runtime_overrides.io_timeout_ms = extended_overrides.io_timeout_ms;
+                value.guest_runtime_overrides.reconnect_interval_ms =
+                    extended_overrides.reconnect_interval_ms;
+                value.guest_runtime_overrides.input_queue_capacity =
+                    extended_overrides.input_queue_capacity;
+                value.guest_runtime_overrides.replay_enabled = extended_overrides.replay_enabled;
+                value.guest_runtime_overrides.diagnostic_hook_groups =
+                    extended_overrides.diagnostic_hook_groups;
+            }
         }
         decoder.finish()?;
         Ok(value)
@@ -927,7 +1164,7 @@ mod tests {
 
         assert_eq!(decoded.session_id, 0xAABB_CCDD);
         assert_eq!(decoded.session_trace_id, 0x2_3456);
-        assert_eq!(decoded.guest_log_level_override, None);
+        assert_eq!(decoded.guest_runtime_overrides.log_level, None);
         assert_eq!(session_trace_label(decoded.session_trace_id), "23456");
     }
 
@@ -943,7 +1180,36 @@ mod tests {
 
         assert_eq!(decoded.session_id, 0xAABB_CCDD);
         assert_eq!(decoded.session_trace_id, 0x2_3456);
-        assert_eq!(decoded.guest_log_level_override, Some(LogSeverity::Debug));
+        assert_eq!(
+            decoded.guest_runtime_overrides.log_level,
+            Some(LogSeverity::Debug)
+        );
+    }
+
+    #[test]
+    fn hello_ok_round_trips_guest_runtime_overrides() {
+        let overrides = GuestRuntimeOverrides {
+            log_level: Some(LogSeverity::Debug),
+            trace_reports: Some(true),
+            trace_report_limit: Some(32),
+            trace_report_max_bytes: Some(48),
+            io_timeout_ms: Some(75),
+            reconnect_interval_ms: Some(250),
+            input_queue_capacity: Some(8),
+            replay_enabled: Some(false),
+            diagnostic_hook_groups: Some(DiagnosticHookGroups::from_bits(0x07)),
+        };
+        let hello_ok = HelloOk::success_with_trace_and_overrides(
+            0xAABB_CCDD,
+            0x12_3456,
+            54,
+            overrides.clone(),
+        );
+        let decoded = HelloOk::decode(&hello_ok.to_bytes().unwrap()).unwrap();
+
+        assert_eq!(decoded.session_id, 0xAABB_CCDD);
+        assert_eq!(decoded.session_trace_id, 0x2_3456);
+        assert_eq!(decoded.guest_runtime_overrides, overrides);
     }
 
     #[test]
@@ -961,7 +1227,11 @@ mod tests {
 
         assert_eq!(decoded.session_id, 0xAABB_CCDD);
         assert_eq!(decoded.session_trace_id, 0x2_3456);
-        assert_eq!(decoded.guest_log_level_override, Some(LogSeverity::Trace));
+        assert_eq!(
+            decoded.guest_runtime_overrides.log_level,
+            Some(LogSeverity::Trace)
+        );
+        assert_eq!(decoded.guest_runtime_overrides.diagnostic_hook_groups, None);
     }
 
     #[test]
@@ -980,7 +1250,7 @@ mod tests {
 
         assert_eq!(decoded.session_id, 0xAABB_CCDD);
         assert_eq!(decoded.session_trace_id, 0);
-        assert_eq!(decoded.guest_log_level_override, None);
+        assert_eq!(decoded.guest_runtime_overrides.log_level, None);
     }
 
     #[test]

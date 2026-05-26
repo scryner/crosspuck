@@ -11,10 +11,11 @@ pub use frame::{
     PROTOCOL_VERSION,
 };
 pub use payload::{
-    session_trace_label, CollectionDescriptor, CollectionRole, FeatureResult, GetFeature, Hello,
-    HelloOk, IdentityPayload, InputAttach, InputAttachOk, InputReport, IoctlCommand, IoctlResult,
-    LogSeverity, SetFeature, SetFeatureResult, SetOutput, SetOutputResult, WriteReport,
-    WriteResult, DEFAULT_GUEST_CAPABILITIES, DEFAULT_INPUT_QUEUE_CAPACITY, SESSION_TRACE_ID_MASK,
+    session_trace_label, CollectionDescriptor, CollectionRole, DiagnosticHookGroups, FeatureResult,
+    GetFeature, GuestRuntimeOverrides, Hello, HelloOk, IdentityPayload, InputAttach, InputAttachOk,
+    InputReport, IoctlCommand, IoctlResult, LogSeverity, SetFeature, SetFeatureResult, SetOutput,
+    SetOutputResult, WriteReport, WriteResult, DEFAULT_GUEST_CAPABILITIES,
+    DEFAULT_INPUT_QUEUE_CAPACITY, SESSION_TRACE_ID_MASK,
 };
 pub use queue::{InputQueueStats, InputReportQueue, QueuedInputReport};
 pub use status::{InvalidStatusCode, StatusCode};

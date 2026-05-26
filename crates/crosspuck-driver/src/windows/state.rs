@@ -141,6 +141,8 @@ fn apply_connection_logging(runtime: &GuestDriverRuntime) {
     let snapshot = runtime.snapshot();
     if !snapshot.bridge_connected {
         set_session_trace_id(None);
+        set_log_level(runtime.config().log_level);
+        let _ = host_override_changed(None);
         return;
     }
 

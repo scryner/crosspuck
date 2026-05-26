@@ -3,9 +3,9 @@ use crate::hid_backend::{
 };
 use crosspuck_core::hid::{snapshot_for_filter, HidFilter};
 use crosspuck_core::protocol::{
-    session_trace_label, Frame, FrameIoError, GetFeature, Hello, HelloOk, IdentityPayload,
-    InputAttach, InputAttachOk, InputReport, LogSeverity, MessageType, ProtocolError, SetFeature,
-    SetOutput, StatusCode, WireDecode, WirePayload, WriteReport, CONTROL_PAYLOAD_LIMIT,
+    session_trace_label, Frame, FrameIoError, GetFeature, GuestRuntimeOverrides, Hello, HelloOk,
+    IdentityPayload, InputAttach, InputAttachOk, InputReport, MessageType, ProtocolError,
+    SetFeature, SetOutput, StatusCode, WireDecode, WirePayload, WriteReport, CONTROL_PAYLOAD_LIMIT,
     INPUT_PAYLOAD_LIMIT, PROTOCOL_VERSION,
 };
 use crosspuck_core::transport::{
@@ -132,9 +132,9 @@ pub struct HostServiceHandle {
     thread: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HostServiceConfig {
-    pub guest_log_level_override: Option<LogSeverity>,
+    pub guest_runtime_overrides: GuestRuntimeOverrides,
 }
 
 impl HostServiceHandle {
@@ -226,7 +226,7 @@ fn run_supervisor(
             input_addr: addrs.input,
         });
 
-        run_accept_loop(&listeners, &app_state, &stop, config);
+        run_accept_loop(&listeners, &app_state, &stop, &config);
     }
 
     app_state.set(HostRuntimeState::Stopping);
@@ -236,7 +236,7 @@ fn run_accept_loop(
     listeners: &TransportListeners,
     app_state: &AppState,
     stop: &Arc<AtomicBool>,
-    config: HostServiceConfig,
+    config: &HostServiceConfig,
 ) {
     let mut next_session_id = 1_u32;
     let mut next_puck_probe = Instant::now();
@@ -275,7 +275,7 @@ fn run_accept_loop(
             &mut control,
             session_id,
             session_trace_id,
-            config.guest_log_level_override,
+            config.guest_runtime_overrides.clone(),
             app_state,
             stop,
         ) {
@@ -310,7 +310,7 @@ fn handle_session(
     control: &mut ChannelStream,
     session_id: u32,
     session_trace_id: u32,
-    guest_log_level_override: Option<LogSeverity>,
+    guest_runtime_overrides: GuestRuntimeOverrides,
     app_state: &AppState,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), RuntimeError> {
@@ -353,7 +353,7 @@ fn handle_session(
         SessionStart {
             session_id,
             session_trace_id,
-            guest_log_level_override,
+            guest_runtime_overrides,
             hello_request_id: hello_frame.header.id,
             guest_pid: hello.guest_pid,
         },
@@ -363,11 +363,11 @@ fn handle_session(
     )
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct SessionStart {
     session_id: u32,
     session_trace_id: u32,
-    guest_log_level_override: Option<LogSeverity>,
+    guest_runtime_overrides: GuestRuntimeOverrides,
     hello_request_id: u32,
     guest_pid: u32,
 }
@@ -408,14 +408,14 @@ fn handle_session_with_backend_timeout(
     write_payload(
         control,
         session.hello_request_id,
-        &HelloOk::success_with_trace_and_log_level(
+        &HelloOk::success_with_trace_and_overrides(
             session.session_id,
             session.session_trace_id,
             identity.default_input_report_len(),
-            session.guest_log_level_override,
+            session.guest_runtime_overrides.clone(),
         ),
     )?;
-    if let Some(log_level) = session.guest_log_level_override {
+    if let Some(log_level) = session.guest_runtime_overrides.log_level {
         log::info!(
             "CrossPuck[{}] guest log level override={}",
             session_trace_label(session.session_trace_id),
@@ -679,7 +679,7 @@ fn hello_ok_with_status(
         protocol_version: PROTOCOL_VERSION as u16,
         session_id,
         session_trace_id,
-        guest_log_level_override: None,
+        guest_runtime_overrides: GuestRuntimeOverrides::default(),
         control_payload_limit: CONTROL_PAYLOAD_LIMIT as u16,
         input_payload_limit: INPUT_PAYLOAD_LIMIT as u16,
         default_input_report_len,
@@ -781,7 +781,7 @@ mod tests {
     use crate::hid_backend::{HostBackend, HostInputReport, InputDescriptor, InputReportReader};
     use crosspuck_core::guest::{GuestTransportClient, GuestTransportConfig};
     use crosspuck_core::protocol::{
-        Channel, CollectionDescriptor, CollectionRole, FeatureResult, IdentityPayload,
+        Channel, CollectionDescriptor, CollectionRole, FeatureResult, IdentityPayload, LogSeverity,
         SetFeatureResult, SetOutputResult, StatusCode, WriteResult,
     };
     use crosspuck_core::transport::{ChannelStream, TransportAddrs, TransportListeners};
@@ -920,7 +920,11 @@ mod tests {
                 SessionStart {
                     session_id: 1,
                     session_trace_id: 0x12345,
-                    guest_log_level_override: Some(LogSeverity::Debug),
+                    guest_runtime_overrides: GuestRuntimeOverrides {
+                        log_level: Some(LogSeverity::Debug),
+                        io_timeout_ms: Some(75),
+                        ..GuestRuntimeOverrides::default()
+                    },
                     hello_request_id: hello.header.id,
                     guest_pid: 1234,
                 },
@@ -942,6 +946,7 @@ mod tests {
         assert_eq!(guest.identity().serial, "FXB9961303C9C");
         assert_eq!(guest.session_trace_id(), 0x12345);
         assert_eq!(guest.guest_log_level_override(), Some(LogSeverity::Debug));
+        assert_eq!(guest.guest_runtime_overrides().io_timeout_ms, Some(75));
         assert_eq!(guest.read_input_report().unwrap().data, vec![0x79, 0x02]);
         assert_eq!(
             guest.get_feature(2, 0x02, 64, 100).unwrap().data,
@@ -1004,7 +1009,7 @@ mod tests {
                     SessionStart {
                         session_id,
                         session_trace_id: 0x12345 + session_id,
-                        guest_log_level_override: None,
+                        guest_runtime_overrides: GuestRuntimeOverrides::default(),
                         hello_request_id: hello.header.id,
                         guest_pid: 1234,
                     },
@@ -1051,7 +1056,7 @@ mod tests {
                 SessionStart {
                     session_id: 1,
                     session_trace_id: 0x12345,
-                    guest_log_level_override: None,
+                    guest_runtime_overrides: GuestRuntimeOverrides::default(),
                     hello_request_id: hello.header.id,
                     guest_pid: 1234,
                 },
@@ -1112,7 +1117,7 @@ mod tests {
                 SessionStart {
                     session_id: 1,
                     session_trace_id: 0x12345,
-                    guest_log_level_override: None,
+                    guest_runtime_overrides: GuestRuntimeOverrides::default(),
                     hello_request_id: hello.header.id,
                     guest_pid: 1234,
                 },
@@ -1160,7 +1165,7 @@ mod tests {
                 &mut control,
                 1,
                 0x12345,
-                None,
+                GuestRuntimeOverrides::default(),
                 &AppState::new(),
                 &server_stop,
             );

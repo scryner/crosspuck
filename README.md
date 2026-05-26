@@ -29,7 +29,8 @@ rustup target add x86_64-pc-windows-gnu
 
 ## Build The Host App
 
-Build a debug app bundle:
+Build a debug app bundle. The bundle includes the release guest `hid.dll` under
+`Contents/Resources/GuestDriver/`:
 
 ```sh
 tools/crosspuck/build-app.sh debug
@@ -45,6 +46,12 @@ The script prints the generated bundle path, for example:
 
 ```text
 target/release/CrossPuck.app
+```
+
+The embedded guest driver manifest is written to:
+
+```text
+CrossPuck.app/Contents/Resources/GuestDriver/manifest.json
 ```
 
 Start the app before launching Steam in the CrossOver bottle.

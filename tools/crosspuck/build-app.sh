@@ -3,13 +3,46 @@ set -eu
 
 profile="${1:-debug}"
 root_dir="$(cd "$(dirname "$0")/../.." && pwd)"
+driver_target="x86_64-pc-windows-gnu"
+driver_profile="release"
+
+ensure_driver_target_installed() {
+  if ! command -v rustup >/dev/null 2>&1; then
+    cat >&2 <<EOF
+rustup is required to verify the Windows target before building the guest driver.
+
+Install rustup first, then add the driver target:
+  rustup target add $driver_target
+EOF
+    exit 1
+  fi
+
+  if ! rustup target list --installed | grep -Fxq "$driver_target"; then
+    cat >&2 <<EOF
+Required Rust target is not installed:
+  $driver_target
+
+Install it first:
+  rustup target add $driver_target
+EOF
+    exit 1
+  fi
+}
+
+sha256_file() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+file_size() {
+  wc -c < "$1" | tr -d '[:space:]'
+}
 
 case "$profile" in
   debug)
-    cargo build -p crosspuck-app
+    app_cargo_args=""
     ;;
   release)
-    cargo build -p crosspuck-app --release
+    app_cargo_args="--release"
     ;;
   *)
     echo "usage: $0 [debug|release]" >&2
@@ -17,15 +50,47 @@ case "$profile" in
     ;;
 esac
 
+ensure_driver_target_installed
+
+cargo build \
+  --manifest-path "$root_dir/Cargo.toml" \
+  -p crosspuck-driver \
+  --release \
+  --target "$driver_target"
+
+# shellcheck disable=SC2086
+cargo build --manifest-path "$root_dir/Cargo.toml" -p crosspuck-app $app_cargo_args
+
+driver_dll="$root_dir/target/$driver_target/$driver_profile/hid.dll"
+if [ ! -f "$driver_dll" ]; then
+  echo "driver DLL not found after build: $driver_dll" >&2
+  exit 1
+fi
+
 app_dir="$root_dir/target/$profile/CrossPuck.app"
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
+guest_driver_dir="$resources_dir/GuestDriver"
 
 rm -rf "$app_dir"
-mkdir -p "$macos_dir" "$resources_dir"
+mkdir -p "$macos_dir" "$resources_dir" "$guest_driver_dir"
 cp "$root_dir/target/$profile/CrossPuck" "$macos_dir/CrossPuck"
 cp "$root_dir/crates/crosspuck-app/Info.plist" "$contents_dir/Info.plist"
 cp -R "$root_dir/crates/crosspuck-app/Resources/." "$resources_dir/"
+cp "$driver_dll" "$guest_driver_dir/hid.dll"
+
+driver_sha256="$(sha256_file "$guest_driver_dir/hid.dll")"
+driver_size="$(file_size "$guest_driver_dir/hid.dll")"
+cat > "$guest_driver_dir/manifest.json" <<EOF
+{
+  "name": "crosspuck-driver",
+  "dll_name": "hid.dll",
+  "target": "$driver_target",
+  "profile": "$driver_profile",
+  "sha256": "$driver_sha256",
+  "size": $driver_size
+}
+EOF
 
 echo "$app_dir"

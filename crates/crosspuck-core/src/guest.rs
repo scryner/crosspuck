@@ -1,8 +1,8 @@
 use crate::protocol::{
-    Channel, FeatureResult, Frame, FrameIoError, GetFeature, Hello, HelloOk, IdentityPayload,
-    InputAttach, InputAttachOk, InputQueueStats, InputReport, InputReportQueue, LogSeverity,
-    MessageType, ProtocolError, QueuedInputReport, SetFeature, SetFeatureResult, SetOutput,
-    SetOutputResult, StatusCode, WireDecode, WirePayload, WriteReport, WriteResult,
+    Channel, FeatureResult, Frame, FrameIoError, GetFeature, GuestRuntimeOverrides, Hello, HelloOk,
+    IdentityPayload, InputAttach, InputAttachOk, InputQueueStats, InputReport, InputReportQueue,
+    LogSeverity, MessageType, ProtocolError, QueuedInputReport, SetFeature, SetFeatureResult,
+    SetOutput, SetOutputResult, StatusCode, WireDecode, WirePayload, WriteReport, WriteResult,
     PROTOCOL_VERSION,
 };
 use crate::transport::{ChannelStream, TransportAddrs, TransportError};
@@ -100,7 +100,16 @@ impl GuestTransportClient {
         )?;
         let session_id = hello_ok.session_id;
         let session_trace_id = hello_ok.session_trace_id;
-        let guest_log_level_override = hello_ok.guest_log_level_override;
+        let guest_runtime_overrides = hello_ok.guest_runtime_overrides;
+        let steady_io_timeout = guest_runtime_overrides
+            .io_timeout_ms
+            .map(|millis| Duration::from_millis(u64::from(millis)))
+            .unwrap_or(config.io_timeout);
+        let input_queue_capacity = guest_runtime_overrides
+            .input_queue_capacity
+            .map(usize::from)
+            .unwrap_or(crate::protocol::DEFAULT_INPUT_QUEUE_CAPACITY)
+            .max(1);
 
         let mut input = at_stage(
             "input connect",
@@ -159,25 +168,25 @@ impl GuestTransportClient {
         at_stage(
             "control set steady read timeout",
             control
-                .set_read_timeout(Some(config.io_timeout))
+                .set_read_timeout(Some(steady_io_timeout))
                 .map_err(Into::into),
         )?;
         at_stage(
             "control set steady write timeout",
             control
-                .set_write_timeout(Some(config.io_timeout))
+                .set_write_timeout(Some(steady_io_timeout))
                 .map_err(Into::into),
         )?;
         at_stage(
             "input set steady read timeout",
             input
-                .set_read_timeout(Some(config.io_timeout))
+                .set_read_timeout(Some(steady_io_timeout))
                 .map_err(Into::into),
         )?;
         at_stage(
             "input set steady write timeout",
             input
-                .set_write_timeout(Some(config.io_timeout))
+                .set_write_timeout(Some(steady_io_timeout))
                 .map_err(Into::into),
         )?;
 
@@ -186,7 +195,7 @@ impl GuestTransportClient {
                 identity,
                 session_id,
                 session_trace_id,
-                guest_log_level_override,
+                guest_runtime_overrides,
                 guest_label: config.guest_label,
             },
             control: GuestControl {
@@ -195,7 +204,7 @@ impl GuestTransportClient {
             },
             input: GuestInput {
                 input,
-                input_queue: InputReportQueue::default(),
+                input_queue: InputReportQueue::with_capacity(input_queue_capacity),
             },
         })
     }
@@ -213,7 +222,7 @@ pub struct GuestSessionInfo {
     pub identity: IdentityPayload,
     pub session_id: u32,
     pub session_trace_id: u32,
-    pub guest_log_level_override: Option<LogSeverity>,
+    pub guest_runtime_overrides: GuestRuntimeOverrides,
     pub guest_label: String,
 }
 
@@ -237,7 +246,11 @@ impl GuestSession {
     }
 
     pub fn guest_log_level_override(&self) -> Option<LogSeverity> {
-        self.info.guest_log_level_override
+        self.info.guest_runtime_overrides.log_level
+    }
+
+    pub fn guest_runtime_overrides(&self) -> &GuestRuntimeOverrides {
+        &self.info.guest_runtime_overrides
     }
 
     pub fn guest_label(&self) -> &str {

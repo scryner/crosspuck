@@ -1,4 +1,4 @@
-use crosspuck_core::protocol::LogSeverity;
+use crosspuck_core::protocol::{GuestRuntimeOverrides, LogSeverity};
 use log::LevelFilter;
 use oslog::OsLogger;
 use std::env;
@@ -47,6 +47,10 @@ impl LoggingConfig {
     pub(crate) fn guest_log_level_override(&self) -> Option<LogSeverity> {
         self.override_guest_log_level
             .then(|| log_level_to_severity(self.level))
+    }
+
+    pub(crate) fn guest_runtime_overrides(&self) -> GuestRuntimeOverrides {
+        GuestRuntimeOverrides::with_log_level(self.guest_log_level_override())
     }
 }
 
@@ -236,6 +240,10 @@ mod tests {
             startup_config_from([os("--override-log-level"), os("--log-level=debug")], None);
         assert_eq!(config.level, LevelFilter::Debug);
         assert_eq!(config.guest_log_level_override(), Some(LogSeverity::Debug));
+        assert_eq!(
+            config.guest_runtime_overrides().log_level,
+            Some(LogSeverity::Debug)
+        );
     }
 
     #[test]

@@ -149,7 +149,7 @@ mod macos {
             let service_handle = start_host_service_with_config(
                 app_state.clone(),
                 HostServiceConfig {
-                    guest_log_level_override: logging_config.guest_log_level_override(),
+                    guest_runtime_overrides: logging_config.guest_runtime_overrides(),
                 },
             );
             log::info!("CrossPuck host app started");
