@@ -54,7 +54,11 @@ The embedded guest driver manifest is written to:
 CrossPuck.app/Contents/Resources/GuestDriver/manifest.json
 ```
 
-Start the app before launching Steam in the CrossOver bottle.
+Start the app before launching Steam in the CrossOver bottle. On macOS, grant
+CrossPuck Input Monitoring permission when prompted; without it the app can
+listen for guest connections but cannot open the Steam Controller HID device.
+If permission was denied earlier, enable it in System Settings, then restart
+CrossPuck.
 
 ## Build The Guest Driver
 

@@ -113,6 +113,7 @@ macOS에서 CrossPuck host app을 먼저 실행합니다.
 
 확인할 것:
 
+- macOS가 Input Monitoring 권한을 요청하면 CrossPuck에 허용합니다. 이 권한이 deny되면 host bridge는 listening 상태여도 Steam Controller HID 장치를 열 수 없어 guest handshake가 실패할 수 있습니다. 이전에 거부했다면 System Settings에서 허용한 뒤 CrossPuck을 재시작합니다.
 - host app이 controller를 인식합니다.
 - host bridge가 listening 상태입니다.
 - native Steam이나 다른 프로세스가 controller를 독점하지 않습니다.

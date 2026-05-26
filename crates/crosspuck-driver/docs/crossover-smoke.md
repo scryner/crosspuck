@@ -117,8 +117,11 @@ Start log watching first:
 tail -f "$HOME/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/crosspuck-driver.log"
 ```
 
-Start the macOS host app and confirm it sees the controller. Then start Steam
-from the CrossOver Steam bottle.
+Start the macOS host app and confirm it sees the controller. Grant CrossPuck
+Input Monitoring permission when macOS asks; if this is denied, guest bridge
+handshake can fail before identity is sent. If permission was denied earlier,
+enable it in System Settings and restart CrossPuck. Then start Steam from the
+CrossOver Steam bottle.
 
 Expected early log markers:
 
