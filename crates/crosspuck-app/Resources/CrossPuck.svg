@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>CrossPuck app icon</title>
+  <defs>
+    <linearGradient id="crosspuck-line" x1="122" y1="132" x2="902" y2="884" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#83E8FF"/>
+      <stop offset="0.28" stop-color="#1F6FE5"/>
+      <stop offset="0.62" stop-color="#12315F"/>
+      <stop offset="1" stop-color="#735DFF"/>
+    </linearGradient>
+  </defs>
+
+  <path
+    d="M 254 178 H 770 Q 922 178 922 330 V 694 Q 922 846 770 846 H 254 Q 102 846 102 694 V 330 Q 102 178 254 178 Z"
+    fill="none"
+    stroke="url(#crosspuck-line)"
+    stroke-width="72"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <rect
+    x="278"
+    y="292"
+    width="468"
+    height="224"
+    rx="112"
+    fill="none"
+    stroke="url(#crosspuck-line)"
+    stroke-width="56"
+  />
+  <g fill="none" stroke="url(#crosspuck-line)" stroke-width="32">
+    <circle cx="390" cy="404" r="24"/>
+    <circle cx="512" cy="404" r="24"/>
+    <circle cx="634" cy="404" r="24"/>
+  </g>
+</svg>

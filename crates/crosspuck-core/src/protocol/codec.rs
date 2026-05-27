@@ -26,6 +26,7 @@ pub enum ProtocolError {
     InvalidReserved(&'static str),
     InvalidStatusCode(u16),
     InvalidCollectionRole(u8),
+    InvalidLogSeverity(u8),
     TrailingBytes(usize),
     WrongMessageType {
         expected: MessageType,
@@ -43,6 +44,9 @@ impl fmt::Display for ProtocolError {
             Self::InvalidStatusCode(code) => write!(f, "invalid status code: {code}"),
             Self::InvalidCollectionRole(role) => {
                 write!(f, "invalid collection role: {role}")
+            }
+            Self::InvalidLogSeverity(severity) => {
+                write!(f, "invalid log severity: {severity}")
             }
             Self::TrailingBytes(count) => write!(f, "trailing payload bytes: {count}"),
             Self::WrongMessageType { expected, actual } => {

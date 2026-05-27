@@ -10,10 +10,14 @@
   <string>CrossPuck</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleIconFile</key>
+  <string>CrossPuck</string>
   <key>CFBundleShortVersionString</key>
   <string>0.1.0</string>
   <key>CFBundleVersion</key>
   <string>1</string>
+  <key>NSInputMonitoringUsageDescription</key>
+  <string>CrossPuck reads Steam Controller HID input and forwards controller feedback for CrossOver Steam.</string>
   <key>LSUIElement</key>
   <true/>
 </dict>

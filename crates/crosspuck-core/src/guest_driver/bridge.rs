@@ -135,12 +135,23 @@ impl HostBridge {
             ..GuestTransportConfig::default()
         })?;
         let parts = session.into_parts();
+        let effective_io_timeout = parts
+            .info
+            .guest_runtime_overrides
+            .io_timeout_ms
+            .map(|millis| Duration::from_millis(u64::from(millis)))
+            .unwrap_or(config.io_timeout);
+        let input_queue_capacity = parts
+            .info
+            .guest_runtime_overrides
+            .input_queue_capacity
+            .map(usize::from)
+            .unwrap_or(config.input_queue_capacity)
+            .max(1);
         parts
             .input
             .set_read_timeout(Some(INPUT_PUMP_READ_TIMEOUT))?;
-        let input_queue = Arc::new(Mutex::new(VecDeque::with_capacity(
-            config.input_queue_capacity,
-        )));
+        let input_queue = Arc::new(Mutex::new(VecDeque::with_capacity(input_queue_capacity)));
         let input_routes = Arc::new(Mutex::new(InputRouteState::default()));
         let stats = Arc::new(Mutex::new(HostBridgeInputStats::default()));
         let running = Arc::new(AtomicBool::new(true));
@@ -156,12 +167,12 @@ impl HostBridge {
             Arc::clone(&input_queue),
             Arc::clone(&stats),
             Arc::clone(&running),
-            config.input_queue_capacity.max(1),
+            input_queue_capacity,
         );
 
         Ok(Self {
             info: parts.info,
-            control_transport_timeout_ms: duration_to_u16_ms(config.io_timeout),
+            control_transport_timeout_ms: duration_to_u16_ms(effective_io_timeout),
             command_queue,
             input_queue,
             input_routes,

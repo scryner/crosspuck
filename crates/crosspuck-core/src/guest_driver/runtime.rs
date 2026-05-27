@@ -4,6 +4,7 @@ use super::handles::{VirtualHandleId, VirtualHandleTable};
 use super::identity::{RuntimeIdentity, RuntimeIdentityState};
 use super::profile::{VirtualHidProfile, VirtualHidProfileCatalog};
 use super::trace::TraceLimiter;
+use crate::protocol::{GuestRuntimeOverrides, LogSeverity};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -92,6 +93,22 @@ impl GuestDriverRuntime {
             .and_then(|bridge| bridge.as_ref().map(|bridge| bridge.info().session_trace_id))
     }
 
+    pub fn guest_log_level_override(&self) -> Option<LogSeverity> {
+        self.guest_runtime_overrides().log_level
+    }
+
+    pub fn guest_runtime_overrides(&self) -> GuestRuntimeOverrides {
+        self.bridge
+            .lock()
+            .ok()
+            .and_then(|bridge| {
+                bridge
+                    .as_ref()
+                    .map(|bridge| bridge.info().guest_runtime_overrides.clone())
+            })
+            .unwrap_or_default()
+    }
+
     pub fn catalog_if_connected(&self) -> Option<VirtualHidProfileCatalog> {
         if self.config.host_bridge_required && !self.bridge_healthy() {
             return None;
@@ -144,9 +161,10 @@ impl GuestDriverRuntime {
         if self.bridge_healthy() {
             return Ok(true);
         }
+        let reconnect_interval = self.effective_reconnect_interval();
         self.clear_bridge("stale or missing bridge");
 
-        if !self.should_attempt_connect() {
+        if !self.should_attempt_connect(reconnect_interval) {
             return Ok(false);
         }
 
@@ -156,16 +174,17 @@ impl GuestDriverRuntime {
     pub fn connect_bridge(&self) -> Result<(), GuestDriverError> {
         let bridge = Arc::new(HostBridge::connect(self.config.host_bridge_config())?);
         let identity_payload = bridge.info().identity.clone();
-        let catalog = VirtualHidProfileCatalog::from_identity(
-            &identity_payload,
-            self.config.allow_debug_fallback(),
-        );
+        let allow_debug_fallback =
+            self.allow_debug_fallback_with_overrides(&bridge.info().guest_runtime_overrides);
+        let catalog =
+            VirtualHidProfileCatalog::from_identity(&identity_payload, allow_debug_fallback);
+        self.apply_trace_overrides(&bridge.info().guest_runtime_overrides)?;
 
         *self
             .identity
             .lock()
             .map_err(|_| GuestDriverError::StatePoisoned("identity"))? = {
-            let mut identity = RuntimeIdentity::new(self.config.allow_debug_fallback());
+            let mut identity = RuntimeIdentity::new(allow_debug_fallback);
             identity.set_host_identity(identity_payload);
             identity
         };
@@ -183,6 +202,7 @@ impl GuestDriverRuntime {
     pub fn clear_bridge(&self, _reason: &'static str) {
         let removed_bridge = self.bridge.lock().ok().and_then(|mut bridge| bridge.take());
         drop(removed_bridge);
+        self.reset_trace_limiter();
         self.mark_bridge_stale();
     }
 
@@ -199,6 +219,7 @@ impl GuestDriverRuntime {
         });
         if removed_bridge.is_some() {
             drop(removed_bridge);
+            self.reset_trace_limiter();
             self.mark_bridge_stale();
         }
     }
@@ -395,14 +416,12 @@ impl GuestDriverRuntime {
         }
     }
 
-    fn should_attempt_connect(&self) -> bool {
+    fn should_attempt_connect(&self, reconnect_interval: Duration) -> bool {
         let now = Instant::now();
         let Ok(mut last_attempt) = self.last_connect_attempt.lock() else {
             return false;
         };
-        if last_attempt
-            .is_some_and(|last| now.duration_since(last) < self.config.lazy_reconnect_interval)
-        {
+        if last_attempt.is_some_and(|last| now.duration_since(last) < reconnect_interval) {
             return false;
         }
         *last_attempt = Some(now);
@@ -410,12 +429,67 @@ impl GuestDriverRuntime {
     }
 
     fn operation_timeout_ms(&self, default_timeout: Duration) -> u16 {
-        let timeout = if self.config.io_timeout == DEFAULT_IO_TIMEOUT {
+        let override_io_timeout = self
+            .guest_runtime_overrides()
+            .io_timeout_ms
+            .map(|millis| Duration::from_millis(u64::from(millis)));
+        let timeout = if let Some(timeout) = override_io_timeout {
+            timeout
+        } else if self.config.io_timeout == DEFAULT_IO_TIMEOUT {
             default_timeout
         } else {
             self.config.io_timeout
         };
         timeout.as_millis().min(u128::from(u16::MAX)) as u16
+    }
+
+    fn apply_trace_overrides(
+        &self,
+        overrides: &GuestRuntimeOverrides,
+    ) -> Result<(), GuestDriverError> {
+        let trace_reports = overrides.trace_reports.unwrap_or(self.config.trace_reports);
+        let trace_report_limit = overrides
+            .trace_report_limit
+            .map(|value| value as usize)
+            .unwrap_or(self.config.trace_report_limit);
+        let trace_report_max_bytes = overrides
+            .trace_report_max_bytes
+            .map(usize::from)
+            .unwrap_or(self.config.trace_report_max_bytes);
+        *self
+            .trace_limiter
+            .lock()
+            .map_err(|_| GuestDriverError::StatePoisoned("trace_limiter"))? =
+            TraceLimiter::new(trace_reports, trace_report_limit, trace_report_max_bytes);
+        Ok(())
+    }
+
+    fn allow_debug_fallback_with_overrides(&self, overrides: &GuestRuntimeOverrides) -> bool {
+        !self.config.host_bridge_required
+            && overrides
+                .replay_enabled
+                .unwrap_or(self.config.replay_enabled)
+    }
+
+    fn effective_reconnect_interval(&self) -> Duration {
+        self.reconnect_interval_with_overrides(&self.guest_runtime_overrides())
+    }
+
+    fn reconnect_interval_with_overrides(&self, overrides: &GuestRuntimeOverrides) -> Duration {
+        overrides
+            .reconnect_interval_ms
+            .map(|millis| Duration::from_millis(u64::from(millis)))
+            .unwrap_or(self.config.lazy_reconnect_interval)
+    }
+
+    fn reset_trace_limiter(&self) {
+        if let Ok(mut trace_limiter) = self.trace_limiter.lock() {
+            *trace_limiter = TraceLimiter::new(
+                self.config.trace_reports,
+                self.config.trace_report_limit,
+                self.config.trace_report_max_bytes,
+            );
+        }
     }
 
     fn bridge_healthy(&self) -> bool {
@@ -469,10 +543,11 @@ impl From<HostBridgeError> for GuestDriverError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guest_driver::config::DEFAULT_LAZY_RECONNECT_INTERVAL;
     use crate::guest_driver::identity::default_fallback_identity;
     use crate::protocol::{
-        CollectionRole, Frame, HelloOk, InputAttach, InputAttachOk, InputReport, MessageType,
-        StatusCode, WireDecode, WirePayload, WriteReport, WriteResult,
+        CollectionRole, Frame, GuestRuntimeOverrides, HelloOk, InputAttach, InputAttachOk,
+        InputReport, MessageType, StatusCode, WireDecode, WirePayload, WriteReport, WriteResult,
     };
     use crate::transport::{ChannelStream, TransportAddrs, TransportListeners};
     use std::sync::{mpsc, Arc};
@@ -613,6 +688,132 @@ mod tests {
             75
         );
         assert_eq!(runtime.operation_timeout_ms(DEFAULT_FEEDBACK_TIMEOUT), 75);
+    }
+
+    #[test]
+    fn host_replay_override_is_session_scoped_and_respects_required_mode() {
+        let runtime = GuestDriverRuntime::new(RuntimeConfig::default());
+
+        assert!(!runtime.allow_debug_fallback_with_overrides(&GuestRuntimeOverrides::default()));
+        assert!(
+            runtime.allow_debug_fallback_with_overrides(&GuestRuntimeOverrides {
+                replay_enabled: Some(true),
+                ..GuestRuntimeOverrides::default()
+            })
+        );
+
+        let required_runtime = GuestDriverRuntime::new(RuntimeConfig {
+            host_bridge_required: true,
+            ..RuntimeConfig::default()
+        });
+        assert!(
+            !required_runtime.allow_debug_fallback_with_overrides(&GuestRuntimeOverrides {
+                replay_enabled: Some(true),
+                ..GuestRuntimeOverrides::default()
+            })
+        );
+    }
+
+    #[test]
+    fn host_reconnect_interval_override_is_session_scoped() {
+        let runtime = GuestDriverRuntime::new(RuntimeConfig::default());
+
+        assert_eq!(
+            runtime.reconnect_interval_with_overrides(&GuestRuntimeOverrides::default()),
+            DEFAULT_LAZY_RECONNECT_INTERVAL
+        );
+        assert_eq!(
+            runtime.reconnect_interval_with_overrides(&GuestRuntimeOverrides {
+                reconnect_interval_ms: Some(250),
+                ..GuestRuntimeOverrides::default()
+            }),
+            Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn host_runtime_overrides_apply_for_session_and_reset_on_disconnect() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = listeners.local_addrs().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut control = listeners.accept_control().unwrap();
+            control
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            control
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let hello = control.read_frame().unwrap();
+            assert_eq!(hello.header.message_type, MessageType::Hello);
+            write_test_payload(
+                &mut control,
+                hello.header.id,
+                &HelloOk::success_with_trace_and_overrides(
+                    0xCAFE_BABE,
+                    0x12345,
+                    54,
+                    GuestRuntimeOverrides {
+                        trace_reports: Some(true),
+                        trace_report_limit: Some(1),
+                        trace_report_max_bytes: Some(2),
+                        io_timeout_ms: Some(75),
+                        ..GuestRuntimeOverrides::default()
+                    },
+                ),
+            );
+            write_test_payload(&mut control, 0, &default_fallback_identity());
+
+            let mut input = listeners.accept_input().unwrap();
+            input
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            input
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let attach = input.read_frame().unwrap();
+            assert_eq!(attach.header.message_type, MessageType::InputAttach);
+            write_test_payload(
+                &mut input,
+                attach.header.id,
+                &InputAttachOk {
+                    status: StatusCode::Ok,
+                    input_report_len: 54,
+                    first_input_seq: 1,
+                },
+            );
+        });
+
+        ready_rx.recv().unwrap();
+        let runtime = GuestDriverRuntime::new(RuntimeConfig {
+            addrs,
+            host_bridge_enabled: true,
+            host_bridge_required: true,
+            ..RuntimeConfig::default()
+        });
+        runtime.connect_bridge().unwrap();
+
+        assert_eq!(
+            runtime.operation_timeout_ms(DEFAULT_GET_FEATURE_TIMEOUT),
+            75
+        );
+        assert_eq!(
+            runtime.trace_payload(&[0x01, 0x02, 0x03, 0x04]).as_deref(),
+            Some("01 02 ...(+2 bytes)")
+        );
+        assert_eq!(runtime.trace_payload(&[0x05]).as_deref(), None);
+
+        runtime.clear_bridge("test");
+
+        assert_eq!(
+            runtime.operation_timeout_ms(DEFAULT_GET_FEATURE_TIMEOUT),
+            100
+        );
+        assert_eq!(runtime.trace_payload(&[0x01]).as_deref(), None);
+        assert!(runtime.guest_runtime_overrides().is_empty());
+        server.join().unwrap();
     }
 
     #[test]

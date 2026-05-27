@@ -4,7 +4,8 @@ use super::log::{debug_line, error_line, trace_line};
 use super::proc::fn_from_mut;
 use super::state;
 use crosspuck_core::guest_driver::{
-    path_may_be_virtual, VirtualHandleId, VirtualHidProfile, VirtualHidProfileCatalog,
+    classify_hid_query, hid_query_may_target_crosspuck, path_may_be_virtual, HidQueryRoute,
+    VirtualHandleId, VirtualHidProfile, VirtualHidProfileCatalog,
 };
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::fmt;
@@ -197,6 +198,9 @@ pub unsafe extern "C" fn detoured_sdl_hid_enumerate(
         .get()
         .copied()
         .map_or(ptr::null_mut(), |original| original(vendor_id, product_id));
+    if !hid_query_may_target_crosspuck(vendor_id, product_id) {
+        return original;
+    }
     let Some(catalog) = state::catalog("SDL_hid_enumerate") else {
         return original;
     };
@@ -654,12 +658,8 @@ fn sdl_query_matches_catalog(
     vendor_id: u16,
     product_id: u16,
 ) -> bool {
-    let identity = catalog.identity();
-    (vendor_id == 0 || vendor_id == identity.vendor_id || vendor_id == 0x845e)
-        && (product_id == 0
-            || product_id == identity.product_id
-            || product_id == 0x0001
-            || product_id == 0x0002)
+    classify_hid_query(vendor_id, product_id, catalog.identity())
+        == HidQueryRoute::AppendCrossPuckSynthetic
 }
 
 fn read_sdl_report(
@@ -789,7 +789,7 @@ fn log_sdl_success(profile: VirtualHidProfile, operation: &'static str, detail: 
     let detail = detail.to_string();
     let logs = SDL_SUCCESS_LOGS.get_or_init(|| Mutex::new(Vec::new()));
     let Ok(mut logs) = logs.lock() else {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} virtual profile={} {detail}",
             profile.label()
         ));
@@ -806,7 +806,7 @@ fn log_sdl_success(profile: VirtualHidProfile, operation: &'static str, detail: 
             last: now,
             suppressed: 0,
         });
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} virtual profile={} {detail}",
             profile.label()
         ));
@@ -822,12 +822,12 @@ fn log_sdl_success(profile: VirtualHidProfile, operation: &'static str, detail: 
     entry.last = now;
     entry.suppressed = 0;
     if suppressed == 0 {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} virtual profile={} {detail}",
             profile.label()
         ));
     } else {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} virtual profile={} {detail} suppressed={suppressed}",
             profile.label()
         ));
@@ -844,7 +844,7 @@ fn log_sdl_read_success(
     let now = Instant::now();
     let logs = SDL_READ_LOGS.get_or_init(|| Mutex::new(Vec::new()));
     let Ok(mut logs) = logs.lock() else {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} virtual profile={} timeout={} requested={} returned={returned}",
             profile.label(),
             milliseconds,
@@ -859,7 +859,7 @@ fn log_sdl_read_success(
             last: now,
             suppressed: 0,
         });
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} virtual profile={} timeout={} requested={} returned={returned}",
             profile.label(),
             milliseconds,
@@ -877,14 +877,14 @@ fn log_sdl_read_success(
     entry.last = now;
     entry.suppressed = 0;
     if suppressed == 0 {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} virtual profile={} timeout={} requested={} returned={returned}",
             profile.label(),
             milliseconds,
             requested
         ));
     } else {
-        debug_line(&format!(
+        trace_line(&format!(
             "[crosspuck] {operation} virtual profile={} timeout={} requested={} returned={returned} suppressed={suppressed}",
             profile.label(),
             milliseconds,

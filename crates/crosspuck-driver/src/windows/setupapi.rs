@@ -1,8 +1,12 @@
 use super::hidd::HID_INTERFACE_GUID;
-use super::log::debug_line;
+use super::kernel32;
+use super::log::{debug_line, trace_line};
 use super::proc::fn_from_mut;
 use super::state;
-use crosspuck_core::guest_driver::{VirtualHidProfile, VirtualHidProfileCatalog};
+use crosspuck_core::guest_driver::{
+    should_append_synthetic_to_setupapi_query, SetupApiQuery, VirtualHidProfile,
+    VirtualHidProfileCatalog,
+};
 use std::ffi::c_void;
 use std::mem;
 use std::sync::{Mutex, OnceLock};
@@ -154,6 +158,7 @@ static ORIGINAL_SETUPDI_GET_DEVICE_INSTANCE_ID_A: OnceLock<SetupDiGetDeviceInsta
 static ORIGINAL_SETUPDI_GET_DEVICE_PROPERTY_W: OnceLock<SetupDiGetDevicePropertyWFn> =
     OnceLock::new();
 static SYNTHETIC_ENUM_BASES: OnceLock<Mutex<Vec<(usize, u32)>>> = OnceLock::new();
+static SYNTHETIC_ELIGIBLE_DEVICE_INFO_SETS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 static VIRTUAL_DEVINSTS: OnceLock<Mutex<Vec<(u32, VirtualHidProfile)>>> = OnceLock::new();
 
 pub fn set_original_setupdi_get_class_devs_w(ptr: *mut c_void) -> Result<(), String> {
@@ -228,14 +233,22 @@ pub unsafe extern "system" fn detoured_setupdi_get_class_devs_w(
     hwnd_parent: HANDLE,
     flags: u32,
 ) -> HANDLE {
+    let synthetic_allowed = synthetic_catalog_query_allowed_w(class_guid, enumerator);
     let original = ORIGINAL_SETUPDI_GET_CLASS_DEVS_W
         .get()
         .copied()
         .map(|original| original(class_guid, enumerator, hwnd_parent, flags));
     if original.is_some_and(|handle| handle != INVALID_HANDLE_VALUE) {
-        return original.unwrap();
+        let handle = original.unwrap();
+        if synthetic_allowed {
+            remember_synthetic_eligible_device_info_set(handle);
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetClassDevsW native hid handle={handle:p} flags=0x{flags:08X}"
+            ));
+        }
+        return handle;
     }
-    if is_hid_interface_guid(class_guid) && runtime_catalog().is_some() {
+    if synthetic_allowed && runtime_catalog().is_some() {
         debug_line(&format!(
             "[crosspuck] SetupDiGetClassDevsW synthetic flags=0x{flags:08X}"
         ));
@@ -251,14 +264,22 @@ pub unsafe extern "system" fn detoured_setupdi_get_class_devs_a(
     hwnd_parent: HANDLE,
     flags: u32,
 ) -> HANDLE {
+    let synthetic_allowed = synthetic_catalog_query_allowed_a(class_guid, enumerator);
     let original = ORIGINAL_SETUPDI_GET_CLASS_DEVS_A
         .get()
         .copied()
         .map(|original| original(class_guid, enumerator, hwnd_parent, flags));
     if original.is_some_and(|handle| handle != INVALID_HANDLE_VALUE) {
-        return original.unwrap();
+        let handle = original.unwrap();
+        if synthetic_allowed {
+            remember_synthetic_eligible_device_info_set(handle);
+            debug_line(&format!(
+                "[crosspuck] SetupDiGetClassDevsA native hid handle={handle:p} flags=0x{flags:08X}"
+            ));
+        }
+        return handle;
     }
-    if is_hid_interface_guid(class_guid) && runtime_catalog().is_some() {
+    if synthetic_allowed && runtime_catalog().is_some() {
         debug_line(&format!(
             "[crosspuck] SetupDiGetClassDevsA synthetic flags=0x{flags:08X}"
         ));
@@ -284,6 +305,11 @@ pub unsafe extern "system" fn detoured_setupdi_enum_device_interfaces(
             device_interface_data,
         );
         if result != 0 {
+            if is_hid_interface_guid(interface_class_guid) {
+                debug_line(&format!(
+                    "[crosspuck] SetupDiEnumDeviceInterfaces native index={member_index} set={device_info_set:p}"
+                ));
+            }
             return result;
         }
     }
@@ -327,7 +353,7 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_interface_detail_w(
             device_info_data,
         );
     }
-    ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_W
+    let result = ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_W
         .get()
         .copied()
         .map_or(0, |original| {
@@ -339,7 +365,15 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_interface_detail_w(
                 required_size,
                 device_info_data,
             )
-        })
+        });
+    if result != 0 {
+        log_native_device_interface_detail_w(
+            device_interface_detail_data,
+            device_interface_detail_data_size,
+            device_info_data,
+        );
+    }
+    result
 }
 
 pub unsafe extern "system" fn detoured_setupdi_get_device_interface_detail_a(
@@ -359,7 +393,7 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_interface_detail_a(
             device_info_data,
         );
     }
-    ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_A
+    let result = ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_A
         .get()
         .copied()
         .map_or(0, |original| {
@@ -371,7 +405,15 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_interface_detail_a(
                 required_size,
                 device_info_data,
             )
-        })
+        });
+    if result != 0 {
+        log_native_device_interface_detail_a(
+            device_interface_detail_data,
+            device_interface_detail_data_size,
+            device_info_data,
+        );
+    }
+    result
 }
 
 pub unsafe extern "system" fn detoured_setupdi_enum_device_info(
@@ -606,11 +648,65 @@ fn synthetic_profile_for_member(
     device_info_set: HANDLE,
     member_index: u32,
 ) -> Option<(VirtualHidProfile, VirtualHidProfileCatalog)> {
+    if !synthetic_device_info_set_can_enumerate(device_info_set) {
+        return None;
+    }
     let catalog = runtime_catalog()?;
     let base = synthetic_enum_base_index(device_info_set, member_index);
     let offset = member_index.checked_sub(base)? as usize;
     let profile = catalog.descriptors().get(offset)?.profile;
     Some((profile, catalog))
+}
+
+unsafe fn synthetic_catalog_query_allowed_w(class_guid: *const GUID, enumerator: PCWSTR) -> bool {
+    should_append_synthetic_to_setupapi_query(SetupApiQuery {
+        hid_interface_class: is_hid_interface_guid(class_guid),
+        empty_enumerator: wide_z_is_null_or_empty(enumerator),
+    })
+}
+
+unsafe fn synthetic_catalog_query_allowed_a(class_guid: *const GUID, enumerator: PCSTR) -> bool {
+    should_append_synthetic_to_setupapi_query(SetupApiQuery {
+        hid_interface_class: is_hid_interface_guid(class_guid),
+        empty_enumerator: narrow_z_is_null_or_empty(enumerator),
+    })
+}
+
+unsafe fn wide_z_is_null_or_empty(value: PCWSTR) -> bool {
+    value.is_null() || *value == 0
+}
+
+unsafe fn narrow_z_is_null_or_empty(value: PCSTR) -> bool {
+    value.is_null() || *value == 0
+}
+
+fn synthetic_device_info_set_can_enumerate(device_info_set: HANDLE) -> bool {
+    device_info_set == SYNTHETIC_DEVICE_INFO_SET
+        || is_synthetic_eligible_device_info_set(device_info_set)
+}
+
+fn remember_synthetic_eligible_device_info_set(device_info_set: HANDLE) {
+    if device_info_set == INVALID_HANDLE_VALUE {
+        return;
+    }
+    let set_value = device_info_set as usize;
+    let Ok(mut guard) = SYNTHETIC_ELIGIBLE_DEVICE_INFO_SETS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    else {
+        return;
+    };
+    if !guard.contains(&set_value) {
+        guard.push(set_value);
+    }
+}
+
+fn is_synthetic_eligible_device_info_set(device_info_set: HANDLE) -> bool {
+    let set_value = device_info_set as usize;
+    SYNTHETIC_ELIGIBLE_DEVICE_INFO_SETS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .is_ok_and(|guard| guard.contains(&set_value))
 }
 
 fn synthetic_enum_base_index(device_info_set: HANDLE, member_index: u32) -> u32 {
@@ -748,6 +844,69 @@ unsafe fn write_detail_a_path(detail: *mut c_void, value: &str) {
     let bytes = value.as_bytes();
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), path_ptr, bytes.len());
     *path_ptr.add(bytes.len()) = 0;
+}
+
+unsafe fn log_native_device_interface_detail_w(
+    detail: *mut c_void,
+    detail_size: u32,
+    device_info_data: *mut c_void,
+) {
+    let Some(path) = read_detail_w_path(detail, detail_size) else {
+        return;
+    };
+    trace_line(&format!(
+        "[crosspuck] SetupDiGetDeviceInterfaceDetailW native path={}{}",
+        kernel32::summarize_hid_path(&path),
+        devinst_suffix(device_info_data)
+    ));
+}
+
+unsafe fn log_native_device_interface_detail_a(
+    detail: *mut c_void,
+    detail_size: u32,
+    device_info_data: *mut c_void,
+) {
+    let Some(path) = read_detail_a_path(detail, detail_size) else {
+        return;
+    };
+    trace_line(&format!(
+        "[crosspuck] SetupDiGetDeviceInterfaceDetailA native path={}{}",
+        kernel32::summarize_hid_path(&path),
+        devinst_suffix(device_info_data)
+    ));
+}
+
+unsafe fn read_detail_w_path(detail: *mut c_void, detail_size: u32) -> Option<String> {
+    if detail.is_null() || detail_size <= 4 {
+        return None;
+    }
+    let max_units = ((detail_size - 4) / 2) as usize;
+    let path_ptr = (detail as *const u8).add(4) as *const u16;
+    let mut len = 0;
+    while len < max_units && *path_ptr.add(len) != 0 {
+        len += 1;
+    }
+    (len > 0).then(|| String::from_utf16_lossy(std::slice::from_raw_parts(path_ptr, len)))
+}
+
+unsafe fn read_detail_a_path(detail: *mut c_void, detail_size: u32) -> Option<String> {
+    if detail.is_null() || detail_size <= 4 {
+        return None;
+    }
+    let max_bytes = (detail_size - 4) as usize;
+    let path_ptr = (detail as *const u8).add(4);
+    let mut len = 0;
+    while len < max_bytes && *path_ptr.add(len) != 0 {
+        len += 1;
+    }
+    (len > 0)
+        .then(|| String::from_utf8_lossy(std::slice::from_raw_parts(path_ptr, len)).to_string())
+}
+
+unsafe fn devinst_suffix(device_info_data: *mut c_void) -> String {
+    devinst_from_device_info_data(device_info_data)
+        .map(|devinst| format!(" devinst=0x{devinst:08X}"))
+        .unwrap_or_default()
 }
 
 fn registry_property_value(profile: VirtualHidProfile, property: u32) -> Option<RegistryValue> {

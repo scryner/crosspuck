@@ -1,4 +1,5 @@
 use super::identity::default_fallback_identity;
+use super::routing::classify_device_path;
 use crate::protocol::{CollectionDescriptor, CollectionRole, IdentityPayload};
 
 pub const HID_INTERFACE_GUID_STRING: &str = "{4d1e55b2-f16f-11cf-88cb-001111000030}";
@@ -191,7 +192,7 @@ impl VirtualHidProfileCatalog {
     pub fn profile_for_path(&self, path: &str) -> Option<VirtualHidProfile> {
         let lower = path.to_ascii_lowercase();
         self.profile_for_exact_path(&lower)
-            .or_else(|| self.profile_for_poc_compatible_path(&lower))
+            .or_else(|| self.profile_for_lenient_identity_path(&lower))
     }
 
     pub fn path_may_be_virtual(path: &str) -> bool {
@@ -291,22 +292,20 @@ impl VirtualHidProfileCatalog {
                 "up:{:04x}_u:{:04x}",
                 descriptor.usage_page, descriptor.usage
             );
-            let hid_usage = format!("hid_device_{usage}");
 
             let identity_match = lower_path.contains(&vid) && lower_path.contains(&pid);
             let interface_match = identity_match && lower_path.contains(&mi);
             let collection_match = identity_match
                 && lower_path.contains(&col)
                 && descriptor.profile == VirtualHidProfile::VendorDongle;
-            let usage_match = lower_path.contains(&usage) || lower_path.contains(&hid_usage);
+            let usage_match = identity_match && lower_path.contains(&usage);
 
             (interface_match || collection_match || usage_match).then_some(descriptor.profile)
         })
     }
 
-    fn profile_for_poc_compatible_path(&self, lower_path: &str) -> Option<VirtualHidProfile> {
-        let profile = if lower_path.contains("vid_845e&pid_0002")
-            || lower_path.contains("vid_28de&pid_1304&mi_06")
+    fn profile_for_lenient_identity_path(&self, lower_path: &str) -> Option<VirtualHidProfile> {
+        let profile = if lower_path.contains("vid_28de&pid_1304&mi_06")
             || (lower_path.contains("vid_28de&pid_1304") && lower_path.contains("col02"))
         {
             VirtualHidProfile::VendorDongle
@@ -316,8 +315,7 @@ impl VirtualHidProfileCatalog {
             VirtualHidProfile::Interface4
         } else if lower_path.contains("vid_28de&pid_1304&mi_05") {
             VirtualHidProfile::Interface5
-        } else if lower_path.contains("vid_845e&pid_0001")
-            || lower_path.contains("vid_28de&pid_1304&mi_02")
+        } else if lower_path.contains("vid_28de&pid_1304&mi_02")
             || lower_path.contains("vid_28de&pid_1304")
         {
             VirtualHidProfile::Main
@@ -331,10 +329,7 @@ impl VirtualHidProfileCatalog {
 }
 
 pub fn path_may_be_virtual(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("vid_845e&pid_0001")
-        || lower.contains("vid_845e&pid_0002")
-        || (lower.contains("vid_28de") && lower.contains("pid_1304"))
+    classify_device_path(path).is_crosspuck_candidate()
 }
 
 #[cfg(test)]
@@ -408,24 +403,28 @@ mod tests {
     }
 
     #[test]
-    fn matches_default_wine_hid_paths() {
+    fn rejects_legacy_wine_hid_paths() {
         let identity = default_fallback_identity();
         let catalog = VirtualHidProfileCatalog::from_identity(&identity, false);
 
         assert_eq!(
             catalog.profile_for_path(r"\\?\hid#vid_845e&pid_0001#serial"),
-            Some(VirtualHidProfile::Main)
+            None
         );
         assert_eq!(
             catalog.profile_for_path(r"\\?\hid#vid_845e&pid_0002#serial"),
-            Some(VirtualHidProfile::VendorDongle)
+            None
+        );
+        assert_eq!(
+            catalog.profile_for_path(r"\\?\hid#hid_device_up:ff00_u:0002#serial"),
+            None
         );
     }
 
     #[test]
     fn prefilter_only_accepts_crosspuck_candidates() {
-        assert!(path_may_be_virtual(r"\\?\hid#vid_845e&pid_0001#serial"));
-        assert!(path_may_be_virtual(r"\\?\hid#vid_845e&pid_0002#serial"));
+        assert!(!path_may_be_virtual(r"\\?\hid#vid_845e&pid_0001#serial"));
+        assert!(!path_may_be_virtual(r"\\?\hid#vid_845e&pid_0002#serial"));
         assert!(path_may_be_virtual(
             r"\\?\hid#vid_28de&pid_1304&mi_02#serial"
         ));

@@ -1,3 +1,4 @@
+use crosspuck_core::protocol::{GuestRuntimeOverrides, LogSeverity};
 use log::LevelFilter;
 use oslog::OsLogger;
 use std::env;
@@ -11,6 +12,7 @@ const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
 pub(crate) struct LoggingConfig {
     pub level: LevelFilter,
     pub source: LogLevelSource,
+    pub override_guest_log_level: bool,
     pub invalid_level: Option<String>,
 }
 
@@ -41,6 +43,17 @@ pub(crate) fn init(config: &LoggingConfig) -> Result<(), log::SetLoggerError> {
         .init()
 }
 
+impl LoggingConfig {
+    pub(crate) fn guest_log_level_override(&self) -> Option<LogSeverity> {
+        self.override_guest_log_level
+            .then(|| log_level_to_severity(self.level))
+    }
+
+    pub(crate) fn guest_runtime_overrides(&self) -> GuestRuntimeOverrides {
+        GuestRuntimeOverrides::with_log_level(self.guest_log_level_override())
+    }
+}
+
 fn startup_config_from(
     args: impl IntoIterator<Item = OsString>,
     env_level: Option<OsString>,
@@ -49,9 +62,15 @@ fn startup_config_from(
         raw: env_level,
         source: LogLevelSource::Environment,
     };
+    let mut override_guest_log_level = false;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
+        if arg == "--override-log-level" {
+            override_guest_log_level = true;
+            continue;
+        }
+
         if let Some(raw) = arg
             .to_str()
             .and_then(|arg| arg.strip_prefix("--log-level="))
@@ -76,17 +95,20 @@ fn startup_config_from(
             Ok(level) => LoggingConfig {
                 level,
                 source: selected.source,
+                override_guest_log_level,
                 invalid_level: None,
             },
             Err(raw) => LoggingConfig {
                 level: DEFAULT_LEVEL,
                 source: LogLevelSource::Default,
+                override_guest_log_level,
                 invalid_level: Some(raw),
             },
         },
         None => LoggingConfig {
             level: DEFAULT_LEVEL,
             source: LogLevelSource::Default,
+            override_guest_log_level,
             invalid_level: None,
         },
     }
@@ -118,11 +140,26 @@ fn level_label(level: LevelFilter) -> &'static str {
     }
 }
 
+fn log_level_to_severity(level: LevelFilter) -> LogSeverity {
+    match level {
+        LevelFilter::Off => LogSeverity::Off,
+        LevelFilter::Error => LogSeverity::Error,
+        LevelFilter::Warn => LogSeverity::Warn,
+        LevelFilter::Info => LogSeverity::Info,
+        LevelFilter::Debug => LogSeverity::Debug,
+        LevelFilter::Trace => LogSeverity::Trace,
+    }
+}
+
 pub(crate) fn log_startup(config: &LoggingConfig) {
     log::info!(
-        "CrossPuck host logging initialized: level={} source={}",
+        "CrossPuck host logging initialized: level={} source={} guest_override={}",
         level_label(config.level),
-        config.source.as_str()
+        config.source.as_str(),
+        config
+            .guest_log_level_override()
+            .map(LogSeverity::as_str)
+            .unwrap_or("disabled")
     );
 
     if let Some(raw_level) = config.invalid_level.as_deref() {
@@ -153,6 +190,7 @@ mod tests {
         let config = startup_config_from([], None);
         assert_eq!(config.level, LevelFilter::Info);
         assert_eq!(config.source, LogLevelSource::Default);
+        assert_eq!(config.guest_log_level_override(), None);
         assert_eq!(config.invalid_level, None);
     }
 
@@ -194,5 +232,24 @@ mod tests {
         assert_eq!(config.level, LevelFilter::Info);
         assert_eq!(config.source, LogLevelSource::Default);
         assert_eq!(config.invalid_level.as_deref(), Some("<missing>"));
+    }
+
+    #[test]
+    fn override_log_level_sends_selected_level_to_guest() {
+        let config =
+            startup_config_from([os("--override-log-level"), os("--log-level=debug")], None);
+        assert_eq!(config.level, LevelFilter::Debug);
+        assert_eq!(config.guest_log_level_override(), Some(LogSeverity::Debug));
+        assert_eq!(
+            config.guest_runtime_overrides().log_level,
+            Some(LogSeverity::Debug)
+        );
+    }
+
+    #[test]
+    fn override_log_level_uses_default_level_without_explicit_level() {
+        let config = startup_config_from([os("--override-log-level")], None);
+        assert_eq!(config.level, LevelFilter::Info);
+        assert_eq!(config.guest_log_level_override(), Some(LogSeverity::Info));
     }
 }

@@ -6,11 +6,12 @@ use super::errors::{set_last_error_for, ERROR_DEVICE_NOT_CONNECTED_CODE};
 use super::handles::{
     preparsed_for_profile, profile_for_handle, profile_for_open_handle, profile_for_preparsed,
 };
-use super::log::{debug_line, error_line, trace_line};
+use super::kernel32;
+use super::log::{debug_line, error_line, log_enabled, trace_line};
 use super::proc::fn_from_const;
 use super::real_hid;
 use super::state;
-use crosspuck_core::guest_driver::VirtualHidProfile;
+use crosspuck_core::guest_driver::{GuestLogLevel, VirtualHidProfile};
 use crosspuck_core::protocol::IdentityPayload;
 use std::ffi::c_void;
 use windows_sys::core::GUID;
@@ -220,7 +221,7 @@ pub unsafe extern "system" fn HidD_GetInputReport(
     match runtime.copy_next_input_report(profile, output) {
         Ok(Some(count)) => {
             trace_virtual_payload(profile, "HidD_GetInputReport", &output[..count]);
-            debug_line(&format!(
+            trace_line(&format!(
                 "[crosspuck] HidD_GetInputReport virtual profile={} requested={} returned={count}",
                 profile.label(),
                 report_buffer_len
@@ -229,7 +230,7 @@ pub unsafe extern "system" fn HidD_GetInputReport(
         }
         Ok(None) => {
             zero_buffer(report_buffer, report_buffer_len);
-            debug_line(&format!(
+            trace_line(&format!(
                 "[crosspuck] HidD_GetInputReport virtual profile={} requested={} returned=0",
                 profile.label(),
                 report_buffer_len
@@ -278,7 +279,7 @@ pub unsafe extern "system" fn HidD_GetFeature(
     match runtime.copy_feature_report(profile, report_id, output) {
         Ok(count) => {
             trace_virtual_payload(profile, "HidD_GetFeature", &output[..count]);
-            debug_line(&format!(
+            trace_line(&format!(
                 "[crosspuck] HidD_GetFeature virtual profile={} report_id=0x{report_id:02X} requested={} returned={count}",
                 profile.label(),
                 report_buffer_len
@@ -306,12 +307,16 @@ pub unsafe extern "system" fn HidD_SetFeature(
     let profile = match open_virtual_profile(device) {
         Ok(Some(profile)) => profile,
         Ok(None) => {
-            return call_real_hidd_report(
+            let result =
+                call_real_hidd_report("HidD_SetFeature", device, report_buffer, report_buffer_len);
+            log_real_hidd_output(
                 "HidD_SetFeature",
                 device,
                 report_buffer,
                 report_buffer_len,
-            )
+                result,
+            );
+            return result;
         }
         Err(result) => return result,
     };
@@ -326,7 +331,7 @@ pub unsafe extern "system" fn HidD_SetFeature(
     match runtime.set_feature(profile, payload) {
         Ok(_) => {
             trace_virtual_payload(profile, "HidD_SetFeature", payload);
-            debug_line(&format!(
+            trace_line(&format!(
                 "[crosspuck] HidD_SetFeature virtual profile={} len={}",
                 profile.label(),
                 payload.len()
@@ -354,12 +359,20 @@ pub unsafe extern "system" fn HidD_SetOutputReport(
     let profile = match open_virtual_profile(device) {
         Ok(Some(profile)) => profile,
         Ok(None) => {
-            return call_real_hidd_report(
+            let result = call_real_hidd_report(
                 "HidD_SetOutputReport",
                 device,
                 report_buffer,
                 report_buffer_len,
-            )
+            );
+            log_real_hidd_output(
+                "HidD_SetOutputReport",
+                device,
+                report_buffer,
+                report_buffer_len,
+                result,
+            );
+            return result;
         }
         Err(result) => return result,
     };
@@ -374,7 +387,7 @@ pub unsafe extern "system" fn HidD_SetOutputReport(
     match runtime.set_output(profile, payload) {
         Ok(_) => {
             trace_virtual_payload(profile, "HidD_SetOutputReport", payload);
-            debug_line(&format!(
+            trace_line(&format!(
                 "[crosspuck] HidD_SetOutputReport virtual profile={} len={}",
                 profile.label(),
                 payload.len()
@@ -523,6 +536,42 @@ unsafe fn call_real_hidd_report(
     real_hid::resolve_proc(name)
         .map(|ptr| fn_from_const::<RealFn>(ptr)(device, report_buffer, report_buffer_len))
         .unwrap_or(FALSE_U8)
+}
+
+unsafe fn log_real_hidd_output(
+    operation: &str,
+    device: HANDLE,
+    report_buffer: *mut c_void,
+    report_buffer_len: u32,
+    result: u8,
+) {
+    let path = kernel32::real_hid_path_for_handle(device)
+        .map(|path| kernel32::summarize_hid_path(&path))
+        .unwrap_or_else(|| "<unknown>".to_string());
+    if !log_enabled(GuestLogLevel::Trace) {
+        return;
+    }
+    trace_line(&format!(
+        "[crosspuck] {operation} passthrough real_hid handle={device:p} len={report_buffer_len} result={} path={path} payload={}",
+        result != 0,
+        payload_preview(report_buffer as *const c_void, report_buffer_len)
+    ));
+}
+
+unsafe fn payload_preview(buffer: *const c_void, len: u32) -> String {
+    let Some(payload) = input_slice(buffer, len) else {
+        return "<unavailable>".to_string();
+    };
+    let mut rendered = payload
+        .iter()
+        .take(32)
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if payload.len() > 32 {
+        rendered.push_str(" ...");
+    }
+    rendered
 }
 
 unsafe fn call_real_hidd_handle_bool(name: &str, device: HANDLE) -> u8 {

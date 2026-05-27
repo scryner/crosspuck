@@ -45,63 +45,44 @@ CrossOver smoke build target on macOS.
 Install next to `Steam.exe`, not into `drive_c/windows/system32`.
 
 ```sh
-tools/crossover/install-driver.sh --bottle Steam
+tools/crosspuck/install-driver.sh --bottle Steam
 ```
 
 Optional flags:
 
 ```sh
-tools/crossover/install-driver.sh \
+tools/crosspuck/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
-  --log-level trace \
-  --trace 1 \
-  --required 1
+  --no-build
 ```
 
 The script:
 
 - copies `hid.dll` into the detected Steam directory,
 - backs up an existing local `hid.dll` under `crosspuck-backups/`,
-- creates `crosspuck-driver-env.reg` in the bottle root,
 - initializes `crosspuck-driver.log` in the Steam directory.
 
-## Import DLL Override And Environment Variables
+The installer does not write guest runtime `CROSSPUCK_*` registry/environment
+settings. Guest runtime settings come from built-in defaults and host connection
+overrides.
 
-Import the generated registry file into the same bottle:
+## Optional Wine Loader Override
 
-```text
-<Bottle>/crosspuck-driver-env.reg
+If CrossOver does not load the app-local `hid.dll` next to `Steam.exe`, generate
+a loader-only Wine override registry file:
+
+```sh
+tools/crosspuck/install-driver.sh --bottle Steam --write-wine-override
 ```
 
-This step is recommended for smoke testing, but the production driver now has
-safe built-in defaults when the registry/env values are missing:
+Then import the generated file into the same bottle:
 
 ```text
-CROSSPUCK_HOST_BRIDGE=1
-CROSSPUCK_HOST_BRIDGE_REQUIRED=1
-CROSSPUCK_LOG_LEVEL=info
-CROSSPUCK_TRACE_REPORTS=0
-CROSSPUCK_HOST_BRIDGE_CONNECT_TIMEOUT_MS=1000
-CROSSPUCK_HOST_BRIDGE_HANDSHAKE_TIMEOUT_MS=2000
+<Bottle>/crosspuck-wine-override.reg
 ```
 
-When `CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS` is unset, the driver uses
-operation-specific low-latency timeouts: `WRITE`/`SET_OUTPUT` 20ms,
-`SET_FEATURE` 50ms, and `GET_FEATURE` 100ms. With those defaults, discovery
-should work without importing this registry file as long as the host app is
-running before Steam starts.
-
-Importing the `.reg` file is still useful for two reasons:
-
-- it sets Wine's `hid` DLL override to prefer the native DLL copied next to
-  `Steam.exe`,
-- it sets the `CROSSPUCK_*` bridge/trace environment variables used by the
-  guest driver,
-- it removes any older global `CROSSPUCK_HOST_BRIDGE_IO_TIMEOUT_MS` registry
-  value so the per-operation defaults apply.
-
-The registry file sets this DLL override:
+The file only sets this DLL override:
 
 ```text
 HKCU\Software\Wine\DllOverrides
@@ -112,17 +93,12 @@ hid = native,builtin
 still allowing the driver to fall back to Wine's builtin `hid` implementation
 for non-virtual HID calls.
 
-The registry file also sets:
+It does not set guest runtime options. Guest severity is controlled by the host
+connection override, for example:
 
-```text
-CROSSPUCK_HOST_BRIDGE=1
-CROSSPUCK_HOST_BRIDGE_REQUIRED=1
-CROSSPUCK_LOG_LEVEL=info
-CROSSPUCK_TRACE_REPORTS=0
+```sh
+open -a CrossPuck --args --override-log-level --log-level debug
 ```
-
-Set `CROSSPUCK_LOG_LEVEL=debug` for hook/discovery diagnostics, or
-`CROSSPUCK_LOG_LEVEL=trace` with `CROSSPUCK_TRACE_REPORTS=1` for payload traces.
 
 One practical CrossOver path:
 
@@ -130,15 +106,8 @@ One practical CrossOver path:
 2. Select the Steam bottle.
 3. Use Run Command.
 4. Run `regedit`.
-5. Import `crosspuck-driver-env.reg`.
+5. Import `crosspuck-wine-override.reg` if the loader override is needed.
 6. Quit Steam fully if it was already running.
-
-The install script generates the `.reg` file but does not currently import it
-automatically. Import it when you want trace logging and an explicit bottle
-override record.
-
-If CrossOver does not pick up `HKCU\Environment` immediately, restart the
-bottle or CrossOver before launching Steam.
 
 ## Run The Smoke
 
@@ -148,18 +117,21 @@ Start log watching first:
 tail -f "$HOME/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/crosspuck-driver.log"
 ```
 
-Start the macOS host app and confirm it sees the controller. Then start Steam
-from the CrossOver Steam bottle.
+Start the macOS host app and confirm it sees the controller. Grant CrossPuck
+Input Monitoring permission when macOS asks; if this is denied, guest bridge
+handshake can fail before identity is sent. If permission was denied earlier,
+enable it in System Settings and restart CrossPuck. Then start Steam from the
+CrossOver Steam bottle.
 
 Expected early log markers:
 
 ```text
-[crosspuck] crosspuck-driver attached host_bridge=true required=true trace=true
+[crosspuck] crosspuck-driver attached ... host_bridge=true required=true ...
 [crosspuck] startup bridge connect skipped: lazy connect enabled
 ```
 
 `hook install ok` and API-level discovery lines are debug-level logs. They are
-only expected when `CROSSPUCK_LOG_LEVEL=debug` or `trace`.
+only expected when the host applies a debug or trace guest severity override.
 
 The host bridge connects lazily when Steam first performs HID discovery or opens
 one of the synthetic paths:
@@ -202,14 +174,13 @@ Steam should retry through the lazy reconnect path when later HID calls occur.
 After the UI pass, run:
 
 ```sh
-tools/crossover/smoke-check.sh --bottle Steam
+tools/crosspuck/smoke-check.sh --bottle Steam
 ```
 
-Hard failures mean the DLL or generated files are missing. Warnings mean a log
-marker was not observed. Common warning causes:
+Hard failures mean the DLL or log file is missing. Warnings mean a log marker
+was not observed. Common warning causes:
 
 - Steam did not load the local `hid.dll`.
-- The registry env vars were not imported for the bottle.
 - The host app was not running.
 - The Steam UI path did not exercise that API yet.
 - SDL hidapi was not loaded by this Steam process, in which case the Win32 HID
@@ -243,5 +214,6 @@ If a previous local `hid.dll` existed, restore it from:
 <Steam dir>/crosspuck-backups/
 ```
 
-Remove the environment variables from the bottle if needed by deleting them from
-`HKCU\Environment` through `regedit`.
+Older smoke runs may have left `crosspuck-driver-env.reg` or `CROSSPUCK_*`
+values under `HKCU\Environment`. They are no longer part of the runtime
+configuration path and can be removed with `regedit` if you want a clean bottle.
