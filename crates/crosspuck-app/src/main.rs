@@ -139,6 +139,13 @@ mod macos {
         unsafe impl NSObjectProtocol for DriverInstallController {}
 
         impl DriverInstallController {
+            #[unsafe(method(validateMenuItem:))]
+            fn validate_menu_item(&self, _item: &NSMenuItem) -> bool {
+                self.ivars().driver_state.refresh_status();
+                refresh_driver_items(&self.ivars().driver_state, &self.ivars().items);
+                self.ivars().driver_state.menu_view().action_enabled
+            }
+
             #[unsafe(method(installDriver:))]
             fn install_driver(&self, _sender: Option<&AnyObject>) {
                 if self.ivars().driver_state.start_install() {
@@ -444,7 +451,7 @@ mod macos {
             let Ok(mut snapshot) = self.snapshot.lock() else {
                 return false;
             };
-            if matches!(*snapshot, DriverMenuSnapshot::Installing) {
+            if !driver_snapshot_allows_install(&snapshot) {
                 return false;
             }
             *snapshot = DriverMenuSnapshot::Installing;
@@ -530,6 +537,14 @@ mod macos {
         let mut shortened = trimmed.chars().take(MAX_LEN).collect::<String>();
         shortened.push_str("...");
         shortened
+    }
+
+    fn driver_snapshot_allows_install(snapshot: &DriverMenuSnapshot) -> bool {
+        match snapshot {
+            DriverMenuSnapshot::Status(status) => status.action_enabled,
+            DriverMenuSnapshot::InstallFailed { .. } => true,
+            DriverMenuSnapshot::Checking | DriverMenuSnapshot::Installing => false,
+        }
     }
 
     unsafe fn bundle_resources_dir() -> Option<PathBuf> {
