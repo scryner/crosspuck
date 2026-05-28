@@ -6,6 +6,7 @@ use crosspuck_core::protocol::{
     session_trace_label, CollectionRole, FeatureResult, GetFeature, IdentityPayload, SetFeature,
     SetFeatureResult, SetOutput, SetOutputResult, StatusCode, WriteReport, WriteResult,
 };
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -18,7 +19,6 @@ const FEATURE_REPORT_RETRY_DELAY: Duration = Duration::from_millis(2);
 const INPUT_REOPEN_BACKOFF: Duration = Duration::from_millis(25);
 const INPUT_ERROR_GRACE: Duration = Duration::from_secs(30);
 const INPUT_DISCONNECT_GRACE: Duration = Duration::from_secs(120);
-const INPUT_IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 static HOST_LOG_SESSION_TRACE_ID: Mutex<Option<u32>> = Mutex::new(None);
 
@@ -81,6 +81,7 @@ pub(crate) struct RealHostBackend {
     snapshot: Arc<Mutex<PuckSnapshot>>,
     identity: IdentityPayload,
     main: SharedMainDevice,
+    interface_devices: Arc<Mutex<BTreeMap<u8, CachedInterfaceDevice>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +91,12 @@ struct SharedMainDevice {
     command_device: Arc<Mutex<HidDevice>>,
 }
 
+#[derive(Debug)]
+struct CachedInterfaceDevice {
+    path: String,
+    device: HidDevice,
+}
+
 impl RealHostBackend {
     pub fn new(snapshot: PuckSnapshot, identity: IdentityPayload) -> Result<Self, HostHidError> {
         let main = Self::open_main_device(&snapshot)?;
@@ -97,6 +104,7 @@ impl RealHostBackend {
             snapshot: Arc::new(Mutex::new(snapshot)),
             identity,
             main,
+            interface_devices: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -122,12 +130,12 @@ impl RealHostBackend {
         Some(path)
     }
 
-    fn paths_for_interface(&self, interface_number: u8) -> Vec<String> {
+    fn candidate_paths_for_interface(&self, interface_number: u8) -> Vec<String> {
         let mut paths = Vec::new();
-        if let Some(path) = self.refresh_path_for_interface(interface_number) {
+        if let Some(path) = self.cached_path_for_interface(interface_number) {
             paths.push(path);
         }
-        if let Some(path) = self.cached_path_for_interface(interface_number) {
+        if let Some(path) = self.refresh_path_for_interface(interface_number) {
             push_unique_path(&mut paths, path);
         }
         paths
@@ -142,9 +150,11 @@ impl RealHostBackend {
     }
 
     fn refresh_main_device(&self) -> Result<(), HostHidError> {
+        crate::probe::note_hid_main_refresh_attempt();
         let snapshot = snapshot_for_filter(&HidFilter::steam_puck())?;
         let path = Self::path_in_snapshot(&snapshot, self.main.interface_number)
             .ok_or(HostHidError::MissingCollection(HidCollectionRole::PuckMain))?;
+        crate::probe::note_hid_open_path_attempt();
         let device = open_path_with_new_api(&path)?;
 
         *self
@@ -160,6 +170,7 @@ impl RealHostBackend {
         if let Ok(mut current) = self.snapshot.lock() {
             *current = snapshot;
         }
+        crate::probe::note_hid_main_refresh_ok();
         Ok(())
     }
 
@@ -171,6 +182,7 @@ impl RealHostBackend {
             .ok_or(HostHidError::MissingCollection(HidCollectionRole::PuckMain))?;
         let interface_number = u8::try_from(collection.interface_number)
             .map_err(|_| HostHidError::InvalidInterfaceNumber(collection.interface_number))?;
+        crate::probe::note_hid_open_path_attempt();
         let device = open_path_with_new_api(&collection.path)?;
         Ok(SharedMainDevice {
             interface_number,
@@ -217,6 +229,7 @@ impl RealHostBackend {
             role: CollectionRole::from(collection.role),
         };
         if self.is_main_interface(interface_number) {
+            crate::probe::note_hid_open_path_attempt();
             let device = open_path_with_new_api(&collection.path)?;
             return Ok(CollectionInputReader::new(
                 self.clone(),
@@ -227,6 +240,7 @@ impl RealHostBackend {
             ));
         }
 
+        crate::probe::note_hid_open_path_attempt();
         let device = open_path_with_new_api(&collection.path)?;
         Ok(CollectionInputReader::new(
             self.clone(),
@@ -242,6 +256,7 @@ impl RealHostBackend {
         interface_number: u8,
         role: CollectionRole,
     ) -> Result<(String, u16, HidDevice), HostHidError> {
+        crate::probe::note_hid_interface_reopen_attempt();
         let snapshot = snapshot_for_filter(&HidFilter::steam_puck())?;
         let collection = snapshot
             .collections
@@ -253,10 +268,12 @@ impl RealHostBackend {
             .ok_or_else(|| HostHidError::MissingCollection(hid_role_for_protocol_role(role)))?;
         let path = collection.path.clone();
         let input_report_len = collection.input_report_len;
+        crate::probe::note_hid_open_path_attempt();
         let device = open_path_with_new_api(&path)?;
         if let Ok(mut current) = self.snapshot.lock() {
             *current = snapshot;
         }
+        crate::probe::note_hid_interface_reopen_ok();
         Ok((path, input_report_len, device))
     }
 
@@ -299,40 +316,113 @@ impl RealHostBackend {
             };
         }
 
-        let paths = self.paths_for_interface(interface_number);
-        if paths.is_empty() {
-            return WriteResult {
+        match self.write_interface_with_retry(interface_number, data) {
+            Ok(written) => WriteResult {
+                status: StatusCode::Ok,
+                bytes_written: saturating_u16(written),
+                os_error: 0,
+            },
+            Err(error) if error.paths.is_empty() => WriteResult {
                 status: StatusCode::UnsupportedInterface,
                 bytes_written: 0,
                 os_error: 0,
-            };
+            },
+            Err(error) => {
+                warn_host_guest_event!(
+                    "HID write failed: interface={} paths={} len={} error={}",
+                    interface_number,
+                    describe_paths(&error.paths),
+                    data.len(),
+                    error.message
+                );
+                WriteResult {
+                    status: StatusCode::HidIoError,
+                    bytes_written: 0,
+                    os_error: 0,
+                }
+            }
+        }
+    }
+
+    fn open_cached_interface_device(
+        &self,
+        interface_number: u8,
+    ) -> Result<CachedInterfaceDevice, FeatureReportError> {
+        let paths = self.candidate_paths_for_interface(interface_number);
+        if paths.is_empty() {
+            return Err(FeatureReportError {
+                paths,
+                message: "no matching HID path".to_string(),
+            });
         }
 
         let mut last_error = None;
         for path in &paths {
-            match open_path_with_new_api(path)
-                .and_then(|device| device.write(data).map_err(Into::into))
-            {
-                Ok(written) => {
-                    return WriteResult {
-                        status: StatusCode::Ok,
-                        bytes_written: saturating_u16(written),
-                        os_error: 0,
-                    };
+            crate::probe::note_hid_open_path_attempt();
+            match open_path_with_new_api(path) {
+                Ok(device) => {
+                    return Ok(CachedInterfaceDevice {
+                        path: path.clone(),
+                        device,
+                    });
                 }
-                Err(error) => last_error = Some(error),
+                Err(error) => last_error = Some(error.to_string()),
             }
         }
 
-        let error = last_error.expect("paths must not be empty");
-        warn_host_guest_event!(
-            "HID write failed: interface={} paths={} len={} error={}",
-            interface_number,
-            describe_paths(&paths),
-            data.len(),
-            error
-        );
-        hid_write_error(error)
+        Err(FeatureReportError {
+            paths,
+            message: last_error.unwrap_or_else(|| "no matching HID path".to_string()),
+        })
+    }
+
+    fn cached_interface_device<'a>(
+        &'a self,
+        devices: &'a mut BTreeMap<u8, CachedInterfaceDevice>,
+        interface_number: u8,
+    ) -> Result<&'a mut CachedInterfaceDevice, FeatureReportError> {
+        if !devices.contains_key(&interface_number) {
+            let device = self.open_cached_interface_device(interface_number)?;
+            devices.insert(interface_number, device);
+        }
+        Ok(devices
+            .get_mut(&interface_number)
+            .expect("cached interface device must exist after insertion"))
+    }
+
+    fn write_interface_with_retry(
+        &self,
+        interface_number: u8,
+        data: &[u8],
+    ) -> Result<usize, FeatureReportError> {
+        let mut last_error = None;
+        let mut last_paths = Vec::new();
+        for attempt in 0..FEATURE_REPORT_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(FEATURE_REPORT_RETRY_DELAY);
+            }
+            let mut devices = self
+                .interface_devices
+                .lock()
+                .map_err(|_| FeatureReportError {
+                    paths: last_paths.clone(),
+                    message: "HID interface device cache lock poisoned".to_string(),
+                })?;
+            let device = self.cached_interface_device(&mut devices, interface_number)?;
+            last_paths = vec![device.path.clone()];
+            match device.device.write(data) {
+                Ok(written) => return Ok(written),
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    devices.remove(&interface_number);
+                }
+            }
+        }
+
+        Err(FeatureReportError {
+            paths: last_paths,
+            message: last_error.unwrap_or_else(|| "unknown HID write error".to_string()),
+        })
     }
 }
 
@@ -364,8 +454,8 @@ impl HostBackend for RealHostBackend {
         let result = if self.is_main_interface(request.interface_number) {
             self.get_main_feature_report_with_retry(request.report_id, &mut buffer)
         } else {
-            get_feature_report_with_retry(
-                || self.paths_for_interface(request.interface_number),
+            self.get_interface_feature_report_with_retry(
+                request.interface_number,
                 request.report_id,
                 &mut buffer,
             )
@@ -398,11 +488,7 @@ impl HostBackend for RealHostBackend {
         let result = if self.is_main_interface(request.interface_number) {
             self.send_main_feature_report_with_retry(request.interface_number, &request.data)
         } else {
-            send_feature_report_with_retry(
-                || self.paths_for_interface(request.interface_number),
-                request.interface_number,
-                &request.data,
-            )
+            self.send_interface_feature_report_with_retry(request.interface_number, &request.data)
         };
         match result {
             Ok(accepted) => SetFeatureResult {
@@ -527,81 +613,85 @@ impl RealHostBackend {
             message: last_error.unwrap_or_else(|| "unknown HID set_feature error".to_string()),
         })
     }
-}
 
-fn get_feature_report_with_retry(
-    mut paths_for_attempt: impl FnMut() -> Vec<String>,
-    report_id: u8,
-    buffer: &mut [u8],
-) -> Result<usize, FeatureReportError> {
-    let mut last_error = None;
-    let mut last_paths = Vec::new();
-    for attempt in 0..FEATURE_REPORT_ATTEMPTS {
-        if attempt > 0 {
-            thread::sleep(FEATURE_REPORT_RETRY_DELAY);
-        }
-        let paths = paths_for_attempt();
-        if paths.is_empty() {
-            continue;
-        }
-        last_paths = paths.clone();
-        for path in &paths {
+    fn get_interface_feature_report_with_retry(
+        &self,
+        interface_number: u8,
+        report_id: u8,
+        buffer: &mut [u8],
+    ) -> Result<usize, FeatureReportError> {
+        let mut last_error = None;
+        let mut last_paths = Vec::new();
+        for attempt in 0..FEATURE_REPORT_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(FEATURE_REPORT_RETRY_DELAY);
+            }
+            let mut devices = self
+                .interface_devices
+                .lock()
+                .map_err(|_| FeatureReportError {
+                    paths: last_paths.clone(),
+                    message: "HID interface device cache lock poisoned".to_string(),
+                })?;
+            let device = self.cached_interface_device(&mut devices, interface_number)?;
+            last_paths = vec![device.path.clone()];
             buffer.fill(0);
             if let Some(first) = buffer.first_mut() {
                 *first = report_id;
             }
-            match open_path_with_new_api(path)
-                .and_then(|device| device.get_feature_report(buffer).map_err(Into::into))
-            {
+            match device.device.get_feature_report(buffer) {
                 Ok(read) => return Ok(read),
-                Err(error) => last_error = Some(error.to_string()),
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    devices.remove(&interface_number);
+                }
             }
         }
-    }
-    Err(FeatureReportError {
-        paths: last_paths,
-        message: last_error.unwrap_or_else(|| "no matching HID path".to_string()),
-    })
-}
 
-fn send_feature_report_with_retry(
-    mut paths_for_attempt: impl FnMut() -> Vec<String>,
-    interface_number: u8,
-    data: &[u8],
-) -> Result<usize, FeatureReportError> {
-    let mut last_error = None;
-    let mut last_paths = Vec::new();
-    for attempt in 0..FEATURE_REPORT_ATTEMPTS {
-        if attempt > 0 {
-            thread::sleep(FEATURE_REPORT_RETRY_DELAY);
-        }
-        let paths = paths_for_attempt();
-        if paths.is_empty() {
-            continue;
-        }
-        last_paths = paths.clone();
-        for path in &paths {
-            match open_path_with_new_api(path).and_then(|device| {
-                device
-                    .send_feature_report(data)
-                    .map(|()| data.len())
-                    .map_err(Into::into)
-            }) {
-                Ok(accepted) => return Ok(accepted),
+        Err(FeatureReportError {
+            paths: last_paths,
+            message: last_error.unwrap_or_else(|| "no matching HID path".to_string()),
+        })
+    }
+
+    fn send_interface_feature_report_with_retry(
+        &self,
+        interface_number: u8,
+        data: &[u8],
+    ) -> Result<usize, FeatureReportError> {
+        let mut last_error = None;
+        let mut last_paths = Vec::new();
+        for attempt in 0..FEATURE_REPORT_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(FEATURE_REPORT_RETRY_DELAY);
+            }
+            let mut devices = self
+                .interface_devices
+                .lock()
+                .map_err(|_| FeatureReportError {
+                    paths: last_paths.clone(),
+                    message: "HID interface device cache lock poisoned".to_string(),
+                })?;
+            let device = self.cached_interface_device(&mut devices, interface_number)?;
+            last_paths = vec![device.path.clone()];
+            match device.device.send_feature_report(data) {
+                Ok(()) => return Ok(data.len()),
                 Err(error) => {
                     let message = error.to_string();
                     if should_accept_transient_set_feature_error(interface_number, data, &message) {
                         return Ok(data.len());
                     }
                     last_error = Some(message);
+                    devices.remove(&interface_number);
                 }
             }
         }
+
+        Err(FeatureReportError {
+            paths: last_paths,
+            message: last_error.unwrap_or_else(|| "no matching HID path".to_string()),
+        })
     }
-    Err(FeatureReportError {
-        paths: last_paths,
-        message: last_error.unwrap_or_else(|| "no matching HID path".to_string()),
-    })
 }
 
 #[derive(Debug)]
@@ -680,9 +770,6 @@ struct CollectionInputReader {
     buffer: Vec<u8>,
     first_error_at: Option<Instant>,
     consecutive_errors: u32,
-    last_activity_at: Instant,
-    last_idle_refresh_at: Instant,
-    idle_timeouts: u32,
 }
 
 impl CollectionInputReader {
@@ -702,9 +789,6 @@ impl CollectionInputReader {
             buffer: vec![0_u8; usize::from(input_report_len).max(64)],
             first_error_at: None,
             consecutive_errors: 0,
-            last_activity_at: Instant::now(),
-            last_idle_refresh_at: Instant::now(),
-            idle_timeouts: 0,
         }
     }
 
@@ -724,14 +808,11 @@ impl CollectionInputReader {
             Ok(0) => {
                 self.first_error_at = None;
                 self.consecutive_errors = 0;
-                self.note_idle_timeout();
                 Ok(None)
             }
             Ok(read) => {
                 self.first_error_at = None;
                 self.consecutive_errors = 0;
-                self.last_activity_at = Instant::now();
-                self.idle_timeouts = 0;
                 Ok(Some(HostInputReport {
                     descriptor: self.descriptor,
                     data: self.buffer[..read].to_vec(),
@@ -742,7 +823,6 @@ impl CollectionInputReader {
                 if is_hid_read_timeout_waiting_for_data(&error_message) {
                     self.first_error_at = None;
                     self.consecutive_errors = 0;
-                    self.note_idle_timeout();
                     return Ok(None);
                 }
                 let grace = if is_hid_read_timeout_device_disconnected(&error_message) {
@@ -767,8 +847,10 @@ impl CollectionInputReader {
                 }
 
                 if self.consecutive_errors == 1 || self.consecutive_errors.is_multiple_of(4) {
+                    crate::probe::note_hid_error_reopen_attempt();
                     match self.refresh_device() {
                         Ok(()) => {
+                            crate::probe::note_hid_error_reopen_ok();
                             self.first_error_at = None;
                             self.consecutive_errors = 0;
                         }
@@ -795,26 +877,6 @@ impl CollectionInputReader {
                 thread::sleep(INPUT_REOPEN_BACKOFF);
                 Ok(None)
             }
-        }
-    }
-
-    fn note_idle_timeout(&mut self) {
-        if self.descriptor.role != CollectionRole::PuckMain {
-            return;
-        }
-
-        self.idle_timeouts = self.idle_timeouts.saturating_add(1);
-
-        let now = Instant::now();
-        if now.duration_since(self.last_activity_at) < INPUT_IDLE_REFRESH_INTERVAL
-            || now.duration_since(self.last_idle_refresh_at) < INPUT_IDLE_REFRESH_INTERVAL
-        {
-            return;
-        }
-
-        self.last_idle_refresh_at = now;
-        if self.refresh_device().is_ok() {
-            self.idle_timeouts = 0;
         }
     }
 
@@ -926,14 +988,6 @@ fn is_hid_read_timeout_device_disconnected(message: &str) -> bool {
 
 fn saturating_u16(value: usize) -> u16 {
     value.min(u16::MAX as usize) as u16
-}
-
-fn hid_write_error(_error: HidSnapshotError) -> WriteResult {
-    WriteResult {
-        status: StatusCode::HidIoError,
-        bytes_written: 0,
-        os_error: 0,
-    }
 }
 
 #[derive(Debug)]
