@@ -33,6 +33,8 @@ mod probe {
 }
 #[cfg(target_os = "macos")]
 mod runtime;
+#[cfg(target_os = "macos")]
+mod user_activity;
 
 #[cfg(target_os = "macos")]
 fn main() -> ExitCode {

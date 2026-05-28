@@ -1,6 +1,7 @@
 use crate::hid_backend::{
     set_host_log_session_trace_id, HostBackend, HostHidError, RealHostBackend,
 };
+use crate::user_activity::UserActivityReporter;
 use crosspuck_core::hid::{snapshot_for_filter, HidFilter};
 use crosspuck_core::protocol::{
     session_trace_label, Frame, FrameIoError, GetFeature, GuestRuntimeOverrides, Hello, HelloOk,
@@ -20,6 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const INPUT_ATTACH_TIMEOUT: Duration = Duration::from_secs(3);
+const USER_ACTIVITY_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HostRuntimeState {
@@ -653,12 +655,14 @@ fn spawn_input_stream(
         };
         let start = Instant::now();
         let mut sequence = 1_u32;
+        let mut user_activity = UserActivityReporter::new(USER_ACTIVITY_INTERVAL);
 
         while running.load(Ordering::Relaxed) {
             match with_worker_autorelease_pool(|| reader.read_report(Duration::from_millis(10))) {
                 Ok(None) => {}
                 Ok(Some(input_report)) => {
                     crate::probe::note_input_report();
+                    user_activity.note_controller_input();
                     let report = InputReport {
                         interface_number: input_report.descriptor.interface_number,
                         role: input_report.descriptor.role,
