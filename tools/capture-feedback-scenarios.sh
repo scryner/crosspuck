@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
-repo_root="$(cd "$script_dir/../.." && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 
 log_path="${CROSSPUCK_HOST_HID_LOG:-$repo_root/captures/native_feedback_${timestamp}.jsonl}"
@@ -82,7 +82,7 @@ mkdir -p "$(dirname "$stdout_log")"
 : > "$log_path"
 : > "$stdout_log"
 
-probe="$("$script_dir/build.sh")"
+probe="$("$script_dir/build-macos-hid-probe.sh")"
 
 echo "Probe:  $probe"
 echo "Log:    $log_path"

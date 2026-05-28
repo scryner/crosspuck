@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  tools/crosspuck/smoke-check.sh [--bottle NAME | --bottle-path PATH] [--log-file PATH]
+  tools/smoke-check.sh [--bottle NAME | --bottle-path PATH] [--log-file PATH]
 
 Checks the CrossOver bottle files and scans the CrossPuck driver log for the
 minimum markers expected after a Steam smoke test.

@@ -2,7 +2,7 @@
 set -eu
 
 profile="${1:-debug}"
-root_dir="$(cd "$(dirname "$0")/../.." && pwd)"
+root_dir="$(cd "$(dirname "$0")/.." && pwd)"
 driver_target="x86_64-pc-windows-gnu"
 driver_profile="release"
 

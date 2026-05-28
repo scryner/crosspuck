@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  tools/crosspuck/install-driver.sh [--bottle NAME | --bottle-path PATH] [--driver PATH] [--steam-dir PATH] [--no-build] [--write-wine-override]
+  tools/install-driver.sh [--bottle NAME | --bottle-path PATH] [--driver PATH] [--steam-dir PATH] [--no-build] [--write-wine-override]
 
 Installs the production crosspuck-driver hid.dll next to Steam.exe inside a
 CrossOver bottle.
@@ -12,8 +12,8 @@ CrossOver bottle.
 The script verifies that the Rust Windows GNU target is installed, builds the
 driver with Cargo unless --no-build is provided, and then installs the resulting
 DLL. It does not write guest runtime CROSSPUCK_* registry/environment settings.
-Guest runtime settings must come from built-in defaults or host connection
-overrides.
+Guest runtime settings use built-in defaults unless the macOS host app sends
+overrides over the bridge connection.
 
 Options:
   --bottle NAME          CrossOver bottle name. Defaults to Steam when present.
@@ -31,7 +31,7 @@ USAGE
 }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/../.." && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 driver_target="x86_64-pc-windows-gnu"
 
 bottle_name=""

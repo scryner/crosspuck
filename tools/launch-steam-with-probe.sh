@@ -60,7 +60,7 @@ mkdir -p "$(dirname "$stdout_log")"
 : > "$stdout_log"
 exec > >(tee -a "$stdout_log") 2>&1
 
-probe="$("$script_dir/build.sh")"
+probe="$("$script_dir/build-macos-hid-probe.sh")"
 
 echo "Probe: $probe"
 echo "Log:   $log_path"

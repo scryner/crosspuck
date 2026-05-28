@@ -3,18 +3,21 @@
 This directory contains install, smoke-test, logging, and reference-probe tools
 used while developing and validating CrossPuck.
 
+Shell entrypoints live directly under `tools/`. Deprecated CrossOver wrapper
+scripts have been removed; use the current `tools/*.sh` commands below.
+
 ## CrossOver Install
 
 Install the production guest driver next to `Steam.exe`:
 
 ```sh
-tools/crosspuck/install-driver.sh --bottle Steam
+tools/install-driver.sh --bottle Steam
 ```
 
 Useful options:
 
 ```sh
-tools/crosspuck/install-driver.sh \
+tools/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
   --no-build
@@ -22,7 +25,9 @@ tools/crosspuck/install-driver.sh \
 
 The script copies `hid.dll`, backs up any existing app-local `hid.dll`, and
 initializes `crosspuck-driver.log` next to Steam. It does not write guest
-runtime `CROSSPUCK_*` registry or environment settings.
+runtime `CROSSPUCK_*` registry or environment settings. Guest runtime settings
+use built-in defaults unless the macOS host app sends overrides over the bridge
+connection.
 
 If CrossOver needs an explicit loader override for the app-local `hid.dll`, run
 with `--write-wine-override` and import the generated loader-only registry file.
@@ -63,7 +68,7 @@ The detailed CrossOver smoke procedure is documented here:
 After exercising the Steam UI, run:
 
 ```sh
-tools/crosspuck/smoke-check.sh --bottle Steam
+tools/smoke-check.sh --bottle Steam
 ```
 
 Warnings from this script are hints, not hard failures. Missing trace markers
@@ -97,27 +102,28 @@ cargo clippy -p crosspuck-driver --target x86_64-pc-windows-msvc -- -D warnings
 
 ## macOS HID Reference Probe
 
-`tools/macos_hid_probe` is a host-side reference tracer for the native macOS
-Steam client. It interposes IOKit HID report calls and logs real feature/output
-report traffic plus input report callbacks for the Valve puck (`VID=0x28DE`,
-`PID=0x1304` by default).
+The macOS HID reference probe is a host-side reference tracer for the native
+macOS Steam client. The shell entrypoints are in `tools/`, while the interposer
+source remains under `tools/macos_hid_probe`. It interposes IOKit HID report
+calls and logs real feature/output report traffic plus input report callbacks
+for the Valve puck (`VID=0x28DE`, `PID=0x1304` by default).
 
 Build:
 
 ```sh
-tools/macos_hid_probe/build.sh
+tools/build-macos-hid-probe.sh
 ```
 
 Run native Steam with the probe:
 
 ```sh
-tools/macos_hid_probe/launch_steam_with_probe.sh
+tools/launch-steam-with-probe.sh
 ```
 
 Run the feedback scenario capture for protocol design:
 
 ```sh
-tools/macos_hid_probe/capture_feedback_scenarios.sh
+tools/capture-feedback-scenarios.sh
 ```
 
 This launches native Steam with the probe, writes JSONL markers for these

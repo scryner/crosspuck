@@ -19,7 +19,7 @@ Shared HID identity, transport, protocol, and guest runtime logic live in
 
 - macOS with Rust installed.
 - Steam Puck/Controller visible to the macOS host.
-- Steam Puck/Controlelr paired with native app(on macOS or Windows).
+- Steam Puck/Controller paired with native app(on macOS or Windows).
 - CrossOver with Steam installed in a bottle.
 - Windows Rust target for the guest DLL:
 
@@ -33,13 +33,13 @@ Build a debug app bundle. The bundle includes the release guest `hid.dll` under
 `Contents/Resources/GuestDriver/`:
 
 ```sh
-tools/crosspuck/build-app.sh debug
+tools/build-app.sh debug
 ```
 
 Build a release app bundle:
 
 ```sh
-tools/crosspuck/build-app.sh release
+tools/build-app.sh release
 ```
 
 The script prints the generated bundle path, for example:
@@ -79,13 +79,13 @@ target/x86_64-pc-windows-gnu/release/hid.dll
 Install the driver next to `Steam.exe` in the target bottle:
 
 ```sh
-tools/crosspuck/install-driver.sh --bottle Steam
+tools/install-driver.sh --bottle Steam
 ```
 
 Useful options:
 
 ```sh
-tools/crosspuck/install-driver.sh \
+tools/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
   --no-build
@@ -93,8 +93,9 @@ tools/crosspuck/install-driver.sh \
 
 The script copies `hid.dll`, backs up any existing local `hid.dll`, and
 initializes `crosspuck-driver.log`. It does not write guest runtime
-`CROSSPUCK_*` registry or environment settings; guest runtime settings come
-from built-in defaults and host connection overrides.
+`CROSSPUCK_*` registry or environment settings; guest runtime settings use
+built-in defaults unless the macOS host app sends overrides over the bridge
+connection.
 
 Do not install this DLL into `drive_c/windows/system32`. It is designed to live
 next to Steam and forward non-virtual HID calls to the real system HID DLL.
@@ -103,7 +104,7 @@ If CrossOver needs an explicit loader override for the app-local `hid.dll`, ask
 the installer to write a loader-only registry file:
 
 ```sh
-tools/crosspuck/install-driver.sh --bottle Steam --write-wine-override
+tools/install-driver.sh --bottle Steam --write-wine-override
 ```
 
 That file only sets Wine's `hid=native,builtin` DLL override. It does not set

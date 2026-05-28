@@ -45,13 +45,13 @@ CrossOver smoke build target on macOS.
 Install next to `Steam.exe`, not into `drive_c/windows/system32`.
 
 ```sh
-tools/crosspuck/install-driver.sh --bottle Steam
+tools/install-driver.sh --bottle Steam
 ```
 
 Optional flags:
 
 ```sh
-tools/crosspuck/install-driver.sh \
+tools/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
   --no-build
@@ -64,8 +64,8 @@ The script:
 - initializes `crosspuck-driver.log` in the Steam directory.
 
 The installer does not write guest runtime `CROSSPUCK_*` registry/environment
-settings. Guest runtime settings come from built-in defaults and host connection
-overrides.
+settings. Guest runtime settings use built-in defaults unless the macOS host app
+sends overrides over the bridge connection.
 
 ## Optional Wine Loader Override
 
@@ -73,7 +73,7 @@ If CrossOver does not load the app-local `hid.dll` next to `Steam.exe`, generate
 a loader-only Wine override registry file:
 
 ```sh
-tools/crosspuck/install-driver.sh --bottle Steam --write-wine-override
+tools/install-driver.sh --bottle Steam --write-wine-override
 ```
 
 Then import the generated file into the same bottle:
@@ -93,8 +93,8 @@ hid = native,builtin
 still allowing the driver to fall back to Wine's builtin `hid` implementation
 for non-virtual HID calls.
 
-It does not set guest runtime options. Guest severity is controlled by the host
-connection override, for example:
+It does not set guest runtime options. Guest severity is controlled by the
+override that the macOS host app sends over the bridge connection, for example:
 
 ```sh
 open -a CrossPuck --args --override-log-level --log-level debug
@@ -174,7 +174,7 @@ Steam should retry through the lazy reconnect path when later HID calls occur.
 After the UI pass, run:
 
 ```sh
-tools/crosspuck/smoke-check.sh --bottle Steam
+tools/smoke-check.sh --bottle Steam
 ```
 
 Hard failures mean the DLL or log file is missing. Warnings mean a log marker
