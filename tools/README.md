@@ -100,6 +100,38 @@ cargo check -p crosspuck-driver --target x86_64-pc-windows-msvc
 cargo clippy -p crosspuck-driver --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
+## Host App Memory Profiling
+
+Run the macOS host app through `cargo run` with the profiling feature and app
+probe enabled:
+
+```sh
+tools/profile-app.sh
+```
+
+By default this writes a capture under `captures/app-profile/YYYYMMDD-HHMMSS`,
+samples RSS and probe counters every 5 seconds, records `vmmap -summary` every
+30 seconds, and writes a 60-second pprof flamegraph.
+
+Useful options:
+
+```sh
+tools/profile-app.sh --dir /tmp/crosspuck-profile --cpu-seconds 120
+tools/profile-app.sh --release --interval-ms 1000 --vmmap-interval-ms 10000
+tools/profile-app.sh -- --override-log-level --log-level debug
+```
+
+After reproducing idle or touchpad-input scenarios, summarize the capture:
+
+```sh
+tools/profile-app-summary.sh --dir /tmp/crosspuck-profile
+tools/profile-app-summary.sh --dir /tmp/crosspuck-profile --leaks
+```
+
+The summary reports RSS deltas, post-warmup deltas, CrossPuck probe counters,
+the latest captured `vmmap` line, any generated CPU flamegraphs, and live
+`ps`/`vmmap` data if the process is still running.
+
 ## macOS HID Reference Probe
 
 The macOS HID reference probe is a host-side reference tracer for the native

@@ -5,6 +5,7 @@ profile="${1:-debug}"
 root_dir="$(cd "$(dirname "$0")/.." && pwd)"
 driver_target="x86_64-pc-windows-gnu"
 driver_profile="release"
+app_features="${CROSSPUCK_APP_FEATURES:-}"
 
 ensure_driver_target_installed() {
   if ! command -v rustup >/dev/null 2>&1; then
@@ -58,8 +59,13 @@ cargo build \
   --release \
   --target "$driver_target"
 
-# shellcheck disable=SC2086
-cargo build --manifest-path "$root_dir/Cargo.toml" -p crosspuck-app $app_cargo_args
+if [ -n "$app_features" ]; then
+  # shellcheck disable=SC2086
+  cargo build --manifest-path "$root_dir/Cargo.toml" -p crosspuck-app $app_cargo_args --features "$app_features"
+else
+  # shellcheck disable=SC2086
+  cargo build --manifest-path "$root_dir/Cargo.toml" -p crosspuck-app $app_cargo_args
+fi
 
 driver_dll="$root_dir/target/$driver_target/$driver_profile/hid.dll"
 if [ ! -f "$driver_dll" ]; then

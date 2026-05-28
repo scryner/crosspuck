@@ -11,6 +11,7 @@ use crosspuck_core::protocol::{
 use crosspuck_core::transport::{
     ChannelStream, TransportAddrs, TransportError, TransportListeners,
 };
+use objc2_foundation::NSAutoreleasePool;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -297,7 +298,7 @@ fn refresh_idle_puck_state(listeners: &TransportListeners, app_state: &AppState)
     if listeners.local_addrs().is_err() {
         return;
     }
-    match snapshot_for_filter(&HidFilter::steam_puck()) {
+    match with_worker_autorelease_pool(|| snapshot_for_filter(&HidFilter::steam_puck())) {
         Ok(snapshot) => app_state.set(HostRuntimeState::PuckConnected {
             serial: snapshot.identity.serial,
         }),
@@ -331,22 +332,25 @@ fn handle_session(
         ));
     }
 
-    let snapshot = match snapshot_for_filter(&HidFilter::steam_puck()) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            app_state.set(HostRuntimeState::PuckDisconnected);
-            let hello_ok = hello_ok_with_status(
-                StatusCode::DeviceDisconnected,
-                session_id,
-                session_trace_id,
-                0,
-            );
-            write_payload(control, hello_frame.header.id, &hello_ok)?;
-            return Err(RuntimeError::DeviceUnavailable(error.to_string()));
-        }
-    };
+    let snapshot =
+        match with_worker_autorelease_pool(|| snapshot_for_filter(&HidFilter::steam_puck())) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                app_state.set(HostRuntimeState::PuckDisconnected);
+                let hello_ok = hello_ok_with_status(
+                    StatusCode::DeviceDisconnected,
+                    session_id,
+                    session_trace_id,
+                    0,
+                );
+                write_payload(control, hello_frame.header.id, &hello_ok)?;
+                return Err(RuntimeError::DeviceUnavailable(error.to_string()));
+            }
+        };
     let identity = IdentityPayload::try_from(&snapshot)?;
-    let backend = Arc::new(RealHostBackend::new(snapshot, identity)?);
+    let backend = Arc::new(with_worker_autorelease_pool(|| {
+        RealHostBackend::new(snapshot, identity)
+    })?);
     handle_session_with_backend(
         listeners,
         control,
@@ -470,7 +474,7 @@ fn handle_session_with_backend_timeout(
         run_control_loop(control, backend.as_ref(), session.session_trace_id, stop);
     input_running.store(false, Ordering::Relaxed);
     let _ = input_thread.join();
-    backend.cleanup_feedback();
+    with_worker_autorelease_pool(|| backend.cleanup_feedback());
     set_host_log_session_trace_id(None);
     app_state.set(HostRuntimeState::PuckConnected {
         serial: identity.serial,
@@ -495,65 +499,69 @@ fn run_control_loop(
             Err(error) if is_timeout_or_would_block(&error) => continue,
             Err(error) => return Err(error.into()),
         };
+        crate::probe::note_control_frame();
 
-        match frame.header.message_type {
-            MessageType::GetFeature => {
-                let request = GetFeature::decode(&frame.payload)?;
-                let result = backend.get_feature(&request);
-                if !result.status.is_ok() {
-                    log::warn!(
-                        "CrossPuck[{session_trace}] GET_FEATURE id={} interface={} report_id=0x{:02X} status={}",
-                        frame.header.id, request.interface_number, request.report_id, result.status
-                    );
+        with_worker_autorelease_pool(|| -> Result<(), RuntimeError> {
+            match frame.header.message_type {
+                MessageType::GetFeature => {
+                    let request = GetFeature::decode(&frame.payload)?;
+                    let result = backend.get_feature(&request);
+                    if !result.status.is_ok() {
+                        log::warn!(
+                            "CrossPuck[{session_trace}] GET_FEATURE id={} interface={} report_id=0x{:02X} status={}",
+                            frame.header.id, request.interface_number, request.report_id, result.status
+                        );
+                    }
+                    write_payload(control, frame.header.id, &result)?;
                 }
-                write_payload(control, frame.header.id, &result)?;
-            }
-            MessageType::SetFeature => {
-                let request = SetFeature::decode(&frame.payload)?;
-                let result = backend.set_feature(&request);
-                if !result.status.is_ok() {
-                    log::warn!(
-                        "CrossPuck[{session_trace}] SET_FEATURE id={} interface={} len={} status={}",
-                        frame.header.id,
-                        request.interface_number,
-                        request.data.len(),
-                        result.status
-                    );
+                MessageType::SetFeature => {
+                    let request = SetFeature::decode(&frame.payload)?;
+                    let result = backend.set_feature(&request);
+                    if !result.status.is_ok() {
+                        log::warn!(
+                            "CrossPuck[{session_trace}] SET_FEATURE id={} interface={} len={} status={}",
+                            frame.header.id,
+                            request.interface_number,
+                            request.data.len(),
+                            result.status
+                        );
+                    }
+                    write_payload(control, frame.header.id, &result)?;
                 }
-                write_payload(control, frame.header.id, &result)?;
-            }
-            MessageType::SetOutput => {
-                let request = SetOutput::decode(&frame.payload)?;
-                let result = backend.set_output(&request);
-                if !result.status.is_ok() {
-                    log::warn!(
-                        "CrossPuck[{session_trace}] SET_OUTPUT id={} interface={} len={} status={}",
-                        frame.header.id,
-                        request.interface_number,
-                        request.data.len(),
-                        result.status
-                    );
+                MessageType::SetOutput => {
+                    let request = SetOutput::decode(&frame.payload)?;
+                    let result = backend.set_output(&request);
+                    if !result.status.is_ok() {
+                        log::warn!(
+                            "CrossPuck[{session_trace}] SET_OUTPUT id={} interface={} len={} status={}",
+                            frame.header.id,
+                            request.interface_number,
+                            request.data.len(),
+                            result.status
+                        );
+                    }
+                    write_payload(control, frame.header.id, &result)?;
                 }
-                write_payload(control, frame.header.id, &result)?;
-            }
-            MessageType::Write => {
-                let request = WriteReport::decode(&frame.payload)?;
-                let result = backend.write_report(&request);
-                if !result.status.is_ok() {
-                    log::warn!(
-                        "CrossPuck[{session_trace}] WRITE id={} interface={} len={} status={}",
-                        frame.header.id,
-                        request.interface_number,
-                        request.data.len(),
-                        result.status
-                    );
+                MessageType::Write => {
+                    let request = WriteReport::decode(&frame.payload)?;
+                    let result = backend.write_report(&request);
+                    if !result.status.is_ok() {
+                        log::warn!(
+                            "CrossPuck[{session_trace}] WRITE id={} interface={} len={} status={}",
+                            frame.header.id,
+                            request.interface_number,
+                            request.data.len(),
+                            result.status
+                        );
+                    }
+                    write_payload(control, frame.header.id, &result)?;
                 }
-                write_payload(control, frame.header.id, &result)?;
+                actual => {
+                    return Err(RuntimeError::UnexpectedControlMessage(actual));
+                }
             }
-            actual => {
-                return Err(RuntimeError::UnexpectedControlMessage(actual));
-            }
-        }
+            Ok(())
+        })?;
     }
 }
 
@@ -640,16 +648,17 @@ fn spawn_input_stream(
     running: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, RuntimeError> {
     Ok(thread::spawn(move || {
-        let Ok(mut reader) = backend.open_input_reader() else {
+        let Ok(mut reader) = with_worker_autorelease_pool(|| backend.open_input_reader()) else {
             return;
         };
         let start = Instant::now();
         let mut sequence = 1_u32;
 
         while running.load(Ordering::Relaxed) {
-            match reader.read_report(Duration::from_millis(10)) {
+            match with_worker_autorelease_pool(|| reader.read_report(Duration::from_millis(10))) {
                 Ok(None) => {}
                 Ok(Some(input_report)) => {
+                    crate::probe::note_input_report();
                     let report = InputReport {
                         interface_number: input_report.descriptor.interface_number,
                         role: input_report.descriptor.role,
@@ -666,6 +675,13 @@ fn spawn_input_stream(
             }
         }
     }))
+}
+
+fn with_worker_autorelease_pool<T>(body: impl FnOnce() -> T) -> T {
+    unsafe {
+        let _pool = NSAutoreleasePool::new();
+        body()
+    }
 }
 
 fn hello_ok_with_status(

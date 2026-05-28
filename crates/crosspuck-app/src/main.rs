@@ -8,6 +8,29 @@ mod driver_install;
 mod hid_backend;
 #[cfg(target_os = "macos")]
 mod logging;
+#[cfg(all(target_os = "macos", feature = "profiling"))]
+mod probe;
+#[cfg(all(target_os = "macos", not(feature = "profiling")))]
+mod probe {
+    pub(crate) fn start_from_env() {}
+    pub(crate) fn note_ui_timer_tick() {}
+    pub(crate) fn note_menu_will_open() {}
+    pub(crate) fn note_menu_refresh() {}
+    pub(crate) fn note_driver_status_check() {}
+    pub(crate) fn note_control_frame() {}
+    pub(crate) fn note_input_report() {}
+    pub(crate) fn note_hid_open_path_attempt() {}
+    pub(crate) fn note_hid_interface_reopen_attempt() {}
+    pub(crate) fn note_hid_interface_reopen_ok() {}
+    pub(crate) fn note_hid_error_reopen_attempt() {}
+    pub(crate) fn note_hid_error_reopen_ok() {}
+    pub(crate) fn note_hid_main_refresh_attempt() {}
+    pub(crate) fn note_hid_main_refresh_ok() {}
+
+    pub(crate) fn with_callback_autorelease_pool<T>(body: impl FnOnce() -> T) -> T {
+        body()
+    }
+}
 #[cfg(target_os = "macos")]
 mod runtime;
 
@@ -87,24 +110,32 @@ mod macos {
         unsafe impl NSMenuDelegate for StateMenuDelegate {
             #[unsafe(method(menuWillOpen:))]
             fn menu_will_open(&self, _menu: &NSMenu) {
-                self.ivars().driver_state.refresh_status();
-                refresh_state_items(
-                    &self.ivars().app_state,
-                    &self.ivars().driver_state,
-                    &self.ivars().items,
-                );
+                crate::probe::note_menu_will_open();
+                let refresh = || {
+                    self.ivars().driver_state.refresh_status();
+                    refresh_state_items(
+                        &self.ivars().app_state,
+                        &self.ivars().driver_state,
+                        &self.ivars().items,
+                    );
+                };
+                crate::probe::with_callback_autorelease_pool(refresh);
             }
         }
 
         impl StateMenuDelegate {
             #[unsafe(method(refreshTimer:))]
             fn refresh_timer(&self, _timer: &NSTimer) {
-                self.ivars().driver_state.refresh_status_throttled();
-                refresh_state_items(
-                    &self.ivars().app_state,
-                    &self.ivars().driver_state,
-                    &self.ivars().items,
-                );
+                crate::probe::note_ui_timer_tick();
+                let refresh = || {
+                    self.ivars().driver_state.refresh_status_throttled();
+                    refresh_state_items(
+                        &self.ivars().app_state,
+                        &self.ivars().driver_state,
+                        &self.ivars().items,
+                    );
+                };
+                crate::probe::with_callback_autorelease_pool(refresh);
             }
         }
     );
@@ -211,6 +242,7 @@ mod macos {
         if logging_initialized {
             crate::logging::log_startup(&logging_config);
         }
+        crate::probe::start_from_env();
 
         let mtm = MainThreadMarker::new().expect("crosspuck-app must run on the main thread");
 
@@ -360,6 +392,7 @@ mod macos {
         driver_state: &DriverMenuState,
         items: &StateMenuItems,
     ) {
+        crate::probe::note_menu_refresh();
         let view = app_state.snapshot().menu_view();
         items
             .status
@@ -422,6 +455,7 @@ mod macos {
             if self.is_installing() {
                 return;
             }
+            crate::probe::note_driver_status_check();
 
             let status = check_driver_install_status(&self.context);
             if let Ok(mut snapshot) = self.snapshot.lock() {
