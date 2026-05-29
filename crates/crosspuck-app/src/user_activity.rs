@@ -7,12 +7,18 @@ use std::time::{Duration, Instant};
 #[cfg(not(test))]
 const ASSERTION_NAME: &str = "CrossPuck Controller Input";
 #[cfg(not(test))]
+const DISPLAY_SLEEP_ASSERTION_TYPE: &str = "PreventUserIdleDisplaySleep";
+#[cfg(not(test))]
+const K_IOPM_ASSERTION_LEVEL_ON: IOPMAssertionLevel = 255;
+#[cfg(not(test))]
 const K_IOPM_USER_ACTIVE_LOCAL: IOPMUserActiveType = 0;
 #[cfg(not(test))]
 const K_IORETURN_SUCCESS: IOReturn = 0;
 
 type IOReturn = i32;
 type IOPMAssertionId = u32;
+#[cfg(not(test))]
+type IOPMAssertionLevel = u32;
 #[cfg(not(test))]
 type IOPMUserActiveType = u32;
 
@@ -35,9 +41,11 @@ impl UserActivityReporter {
 struct ReporterCore<P: PowerManagement> {
     power_management: P,
     assertion_id: Option<IOPMAssertionId>,
+    display_assertion_id: Option<IOPMAssertionId>,
     last_attempt_at: Option<Instant>,
     min_interval: Duration,
     logged_first_success: bool,
+    logged_display_success: bool,
 }
 
 impl<P: PowerManagement> ReporterCore<P> {
@@ -45,9 +53,11 @@ impl<P: PowerManagement> ReporterCore<P> {
         Self {
             power_management,
             assertion_id: None,
+            display_assertion_id: None,
             last_attempt_at: None,
             min_interval,
             logged_first_success: false,
+            logged_display_success: false,
         }
     }
 
@@ -56,6 +66,25 @@ impl<P: PowerManagement> ReporterCore<P> {
             return;
         }
         self.last_attempt_at = Some(now);
+
+        if self.display_assertion_id.is_none() {
+            match self.power_management.prevent_user_idle_display_sleep() {
+                Ok(assertion_id) => {
+                    self.display_assertion_id = Some(assertion_id);
+                    if !self.logged_display_success {
+                        log::info!(
+                            "CrossPuck is preventing macOS display idle sleep during controller session"
+                        );
+                        self.logged_display_success = true;
+                    }
+                }
+                Err(error) => {
+                    log::warn!(
+                        "CrossPuck failed to prevent macOS display idle sleep: IOReturn=0x{error:08X}"
+                    );
+                }
+            }
+        }
 
         match self
             .power_management
@@ -87,20 +116,29 @@ impl<P: PowerManagement> ReporterCore<P> {
 
 impl<P: PowerManagement> Drop for ReporterCore<P> {
     fn drop(&mut self) {
-        let Some(assertion_id) = self.assertion_id.take() else {
-            return;
-        };
+        if let Some(assertion_id) = self.display_assertion_id.take() {
+            if let Err(error) = self.power_management.release_assertion(assertion_id) {
+                log::debug!(
+                    "CrossPuck failed to release macOS display idle sleep assertion: id={} IOReturn=0x{error:08X}",
+                    assertion_id
+                );
+            }
+        }
 
-        if let Err(error) = self.power_management.release_assertion(assertion_id) {
-            log::debug!(
-                "CrossPuck failed to release macOS user activity assertion: id={} IOReturn=0x{error:08X}",
-                assertion_id
-            );
+        if let Some(assertion_id) = self.assertion_id.take() {
+            if let Err(error) = self.power_management.release_assertion(assertion_id) {
+                log::debug!(
+                    "CrossPuck failed to release macOS user activity assertion: id={} IOReturn=0x{error:08X}",
+                    assertion_id
+                );
+            }
         }
     }
 }
 
 trait PowerManagement {
+    fn prevent_user_idle_display_sleep(&mut self) -> Result<IOPMAssertionId, IOReturn>;
+
     fn declare_user_activity(
         &mut self,
         assertion_id: Option<IOPMAssertionId>,
@@ -127,6 +165,26 @@ impl IokitPowerManagement {
 
 #[cfg(not(test))]
 impl PowerManagement for IokitPowerManagement {
+    fn prevent_user_idle_display_sleep(&mut self) -> Result<IOPMAssertionId, IOReturn> {
+        let assertion_type = NSString::from_str(DISPLAY_SLEEP_ASSERTION_TYPE);
+        let name = NSString::from_str(ASSERTION_NAME);
+        let mut assertion_id = 0;
+        let result = unsafe {
+            IOPMAssertionCreateWithName(
+                (&*assertion_type as *const NSString).cast::<c_void>(),
+                K_IOPM_ASSERTION_LEVEL_ON,
+                (&*name as *const NSString).cast::<c_void>(),
+                &mut assertion_id,
+            )
+        };
+
+        if result == K_IORETURN_SUCCESS && assertion_id != 0 {
+            Ok(assertion_id)
+        } else {
+            Err(result)
+        }
+    }
+
     fn declare_user_activity(
         &mut self,
         assertion_id: Option<IOPMAssertionId>,
@@ -170,6 +228,10 @@ impl NoopPowerManagement {
 
 #[cfg(test)]
 impl PowerManagement for NoopPowerManagement {
+    fn prevent_user_idle_display_sleep(&mut self) -> Result<IOPMAssertionId, IOReturn> {
+        Ok(100)
+    }
+
     fn declare_user_activity(
         &mut self,
         assertion_id: Option<IOPMAssertionId>,
@@ -185,6 +247,13 @@ impl PowerManagement for NoopPowerManagement {
 #[cfg(not(test))]
 #[link(name = "IOKit", kind = "framework")]
 extern "C" {
+    fn IOPMAssertionCreateWithName(
+        assertion_type: *const c_void,
+        assertion_level: IOPMAssertionLevel,
+        assertion_name: *const c_void,
+        assertion_id: *mut IOPMAssertionId,
+    ) -> IOReturn;
+
     fn IOPMAssertionDeclareUserActivity(
         assertion_name: *const c_void,
         user_type: IOPMUserActiveType,
@@ -201,21 +270,29 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct FakePowerManagement {
+        display_prevents: u32,
         declares: Vec<Option<IOPMAssertionId>>,
         releases: Arc<Mutex<Vec<IOPMAssertionId>>>,
         results: Vec<Result<Option<IOPMAssertionId>, IOReturn>>,
+        display_results: Vec<Result<IOPMAssertionId, IOReturn>>,
     }
 
     impl FakePowerManagement {
         fn with_results(results: Vec<Result<Option<IOPMAssertionId>, IOReturn>>) -> Self {
             Self {
                 results,
+                display_results: vec![Ok(100)],
                 ..Self::default()
             }
         }
     }
 
     impl PowerManagement for FakePowerManagement {
+        fn prevent_user_idle_display_sleep(&mut self) -> Result<IOPMAssertionId, IOReturn> {
+            self.display_prevents += 1;
+            self.display_results.remove(0)
+        }
+
         fn declare_user_activity(
             &mut self,
             assertion_id: Option<IOPMAssertionId>,
@@ -239,7 +316,9 @@ mod tests {
         reporter.note_controller_input(now);
 
         assert_eq!(reporter.power_management.declares, vec![None]);
+        assert_eq!(reporter.power_management.display_prevents, 1);
         assert_eq!(reporter.assertion_id, Some(42));
+        assert_eq!(reporter.display_assertion_id, Some(100));
     }
 
     #[test]
@@ -252,6 +331,7 @@ mod tests {
         reporter.note_controller_input(now + Duration::from_secs(29));
 
         assert_eq!(reporter.power_management.declares, vec![None]);
+        assert_eq!(reporter.power_management.display_prevents, 1);
     }
 
     #[test]
@@ -264,6 +344,7 @@ mod tests {
         reporter.note_controller_input(now + Duration::from_secs(30));
 
         assert_eq!(reporter.power_management.declares, vec![None, Some(42)]);
+        assert_eq!(reporter.power_management.display_prevents, 1);
         assert_eq!(reporter.assertion_id, Some(43));
     }
 
@@ -278,7 +359,27 @@ mod tests {
         reporter.note_controller_input(now + Duration::from_secs(30));
 
         assert_eq!(reporter.power_management.declares, vec![None, None]);
+        assert_eq!(reporter.power_management.display_prevents, 1);
         assert_eq!(reporter.assertion_id, Some(42));
+    }
+
+    #[test]
+    fn failed_display_sleep_prevention_is_throttled_and_retried() {
+        let now = Instant::now();
+        let fake = FakePowerManagement {
+            results: vec![Ok(Some(42)), Ok(Some(43))],
+            display_results: vec![Err(-1), Ok(100)],
+            ..FakePowerManagement::default()
+        };
+        let mut reporter = ReporterCore::new(Duration::from_secs(30), fake);
+
+        reporter.note_controller_input(now);
+        reporter.note_controller_input(now + Duration::from_secs(1));
+        reporter.note_controller_input(now + Duration::from_secs(30));
+
+        assert_eq!(reporter.power_management.declares, vec![None, Some(42)]);
+        assert_eq!(reporter.power_management.display_prevents, 2);
+        assert_eq!(reporter.display_assertion_id, Some(100));
     }
 
     #[test]
@@ -291,6 +392,6 @@ mod tests {
         reporter.note_controller_input(now);
         drop(reporter);
 
-        assert_eq!(*releases.lock().unwrap(), vec![42]);
+        assert_eq!(*releases.lock().unwrap(), vec![100, 42]);
     }
 }
