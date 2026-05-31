@@ -8,6 +8,12 @@ scripts have been removed; use the current `tools/*.sh` commands below.
 
 ## CrossOver Install
 
+The CrossPuck menu bar app installs, updates, and uninstalls the driver.
+Install, update, and repair also import the generated Wine loader override
+registry file with CrossOver `regedit`; uninstall does not change Wine registry
+settings. These shell commands are for manual development and smoke-test
+workflows.
+
 Install the production guest driver next to `Steam.exe`:
 
 ```sh
@@ -30,8 +36,8 @@ use built-in defaults unless the macOS host app sends overrides over the bridge
 connection.
 
 If CrossOver needs an explicit loader override for the app-local `hid.dll`, run
-with `--write-wine-override` and import the generated loader-only registry file.
-This only sets `hid=native,builtin`; runtime settings remain host-owned.
+with `--write-wine-override` to generate and import the loader-only registry
+file. This only sets `hid=native,builtin`; runtime settings remain host-owned.
 
 Do not copy this DLL into `drive_c/windows/system32`. The driver is intended to
 be app-local and forwards non-virtual HID calls to the real system HID DLL.

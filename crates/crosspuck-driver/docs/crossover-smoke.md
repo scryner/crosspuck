@@ -70,13 +70,13 @@ sends overrides over the bridge connection.
 ## Optional Wine Loader Override
 
 If CrossOver does not load the app-local `hid.dll` next to `Steam.exe`, generate
-a loader-only Wine override registry file:
+and import a loader-only Wine override registry file:
 
 ```sh
 tools/install-driver.sh --bottle Steam --write-wine-override
 ```
 
-Then import the generated file into the same bottle:
+The generated file is kept in the same bottle:
 
 ```text
 <Bottle>/crosspuck-wine-override.reg
@@ -100,14 +100,7 @@ override that the macOS host app sends over the bridge connection, for example:
 open -a CrossPuck --args --override-log-level --log-level debug
 ```
 
-One practical CrossOver path:
-
-1. Open CrossOver.
-2. Select the Steam bottle.
-3. Use Run Command.
-4. Run `regedit`.
-5. Import `crosspuck-wine-override.reg` if the loader override is needed.
-6. Quit Steam fully if it was already running.
+Quit Steam fully if it was already running before importing the override.
 
 ## Run The Smoke
 

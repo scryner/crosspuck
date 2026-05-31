@@ -50,7 +50,8 @@ fn main() -> ExitCode {
 #[cfg(target_os = "macos")]
 mod macos {
     use crate::driver_install::{
-        check_driver_install_status, install_driver, DriverInstallContext, DriverInstallStatus,
+        check_driver_install_status, install_driver, uninstall_driver, DriverInstallContext,
+        DriverInstallState, DriverInstallStatus,
     };
     use crate::runtime::{
         start_host_service_with_config, AppState, HostServiceConfig, HostServiceHandle,
@@ -71,7 +72,6 @@ mod macos {
     use std::process::ExitCode;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::{Duration, Instant};
 
     struct MenuBarObjects {
         _status_item: Retained<NSStatusItem>,
@@ -92,6 +92,7 @@ mod macos {
         error: Retained<NSMenuItem>,
         driver_status: Retained<NSMenuItem>,
         driver_action: Retained<NSMenuItem>,
+        driver_uninstall: Retained<NSMenuItem>,
     }
 
     #[derive(Clone)]
@@ -130,7 +131,6 @@ mod macos {
             fn refresh_timer(&self, _timer: &NSTimer) {
                 crate::probe::note_ui_timer_tick();
                 let refresh = || {
-                    self.ivars().driver_state.refresh_status_throttled();
                     refresh_state_items(
                         &self.ivars().app_state,
                         &self.ivars().driver_state,
@@ -173,15 +173,26 @@ mod macos {
 
         impl DriverInstallController {
             #[unsafe(method(validateMenuItem:))]
-            fn validate_menu_item(&self, _item: &NSMenuItem) -> bool {
-                self.ivars().driver_state.refresh_status();
+            fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
                 refresh_driver_items(&self.ivars().driver_state, &self.ivars().items);
-                self.ivars().driver_state.menu_view().action_enabled
+                let view = self.ivars().driver_state.menu_view();
+                match item.action() {
+                    Some(action) if action == sel!(installDriver:) => view.install_enabled,
+                    Some(action) if action == sel!(uninstallDriver:) => view.uninstall_enabled,
+                    _ => true,
+                }
             }
 
             #[unsafe(method(installDriver:))]
             fn install_driver(&self, _sender: Option<&AnyObject>) {
                 if self.ivars().driver_state.start_install() {
+                    refresh_driver_items(&self.ivars().driver_state, &self.ivars().items);
+                }
+            }
+
+            #[unsafe(method(uninstallDriver:))]
+            fn uninstall_driver(&self, _sender: Option<&AnyObject>) {
+                if self.ivars().driver_state.start_uninstall() {
                     refresh_driver_items(&self.ivars().driver_state, &self.ivars().items);
                 }
             }
@@ -335,6 +346,11 @@ mod macos {
                 Some(sel!(installDriver:)),
                 &empty_key,
             ),
+            driver_uninstall: menu.addItemWithTitle_action_keyEquivalent(
+                &NSString::from_str("Uninstall Steam Driver..."),
+                Some(sel!(uninstallDriver:)),
+                &empty_key,
+            ),
         };
         state_items.status.setEnabled(false);
         state_items.puck.setEnabled(false);
@@ -346,6 +362,9 @@ mod macos {
             DriverInstallController::new(mtm, Arc::clone(&driver_state), state_items.clone());
         state_items
             .driver_action
+            .setTarget(Some(driver_controller.as_ref()));
+        state_items
+            .driver_uninstall
             .setTarget(Some(driver_controller.as_ref()));
 
         let menu_delegate = StateMenuDelegate::new(
@@ -418,30 +437,37 @@ mod macos {
             .setTitle(&NSString::from_str(&view.status_title));
         items
             .driver_action
-            .setTitle(&NSString::from_str(&view.action_title));
-        items.driver_action.setEnabled(view.action_enabled);
+            .setTitle(&NSString::from_str(&view.install_title));
+        items.driver_action.setEnabled(view.install_enabled);
+        items
+            .driver_uninstall
+            .setTitle(&NSString::from_str(&view.uninstall_title));
+        items.driver_uninstall.setEnabled(view.uninstall_enabled);
     }
 
     #[derive(Debug)]
     struct DriverMenuState {
         context: DriverInstallContext,
         snapshot: Mutex<DriverMenuSnapshot>,
-        last_status_check: Mutex<Option<Instant>>,
     }
 
     #[derive(Clone, Debug)]
     enum DriverMenuSnapshot {
         Checking,
         Installing,
+        Uninstalling,
         Status(DriverInstallStatus),
         InstallFailed { message: String },
+        UninstallFailed { message: String },
     }
 
     #[derive(Clone, Debug)]
     struct DriverMenuView {
         status_title: String,
-        action_title: String,
-        action_enabled: bool,
+        install_title: String,
+        install_enabled: bool,
+        uninstall_title: String,
+        uninstall_enabled: bool,
     }
 
     impl DriverMenuState {
@@ -449,7 +475,6 @@ mod macos {
             Self {
                 context,
                 snapshot: Mutex::new(DriverMenuSnapshot::Checking),
-                last_status_check: Mutex::new(None),
             }
         }
 
@@ -463,24 +488,6 @@ mod macos {
             if let Ok(mut snapshot) = self.snapshot.lock() {
                 *snapshot = DriverMenuSnapshot::Status(status);
             }
-            if let Ok(mut last_status_check) = self.last_status_check.lock() {
-                *last_status_check = Some(Instant::now());
-            }
-        }
-
-        fn refresh_status_throttled(&self) {
-            const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
-            if self.is_installing() {
-                return;
-            }
-            if self
-                .last_status_check
-                .lock()
-                .is_ok_and(|last| last.is_some_and(|last| last.elapsed() < STATUS_REFRESH_INTERVAL))
-            {
-                return;
-            }
-            self.refresh_status();
         }
 
         fn start_install(self: &Arc<Self>) -> bool {
@@ -499,20 +506,59 @@ mod macos {
                 let next = match install_driver(&context) {
                     Ok(result) => {
                         log::info!(
-                            "CrossPuck driver installed: target={} backup={} sha256={}",
+                            "CrossPuck driver installed: target={} backup={} sha256={} registry={}",
                             result.target_dll.display(),
                             result
                                 .backup_path
                                 .as_ref()
                                 .map(|path| path.display().to_string())
                                 .unwrap_or_else(|| "-".to_string()),
-                            result.installed_sha256
+                            result.installed_sha256,
+                            result.registry_targets.join(",")
                         );
                         DriverMenuSnapshot::Status(check_driver_install_status(&context))
                     }
                     Err(error) => {
                         log::error!("CrossPuck driver install failed: {error}");
                         DriverMenuSnapshot::InstallFailed {
+                            message: short_menu_message(&error.to_string()),
+                        }
+                    }
+                };
+
+                if let Ok(mut snapshot) = state.snapshot.lock() {
+                    *snapshot = next;
+                }
+            });
+            true
+        }
+
+        fn start_uninstall(self: &Arc<Self>) -> bool {
+            let Ok(mut snapshot) = self.snapshot.lock() else {
+                return false;
+            };
+            if !driver_snapshot_allows_uninstall(&snapshot) {
+                return false;
+            }
+            *snapshot = DriverMenuSnapshot::Uninstalling;
+            drop(snapshot);
+
+            let state = Arc::clone(self);
+            let context = self.context.clone();
+            thread::spawn(move || {
+                let next = match uninstall_driver(&context) {
+                    Ok(result) => {
+                        log::info!(
+                            "CrossPuck driver uninstalled: target={} removed={} registry={}",
+                            result.target_dll.display(),
+                            result.removed_driver,
+                            result.registry_targets.join(",")
+                        );
+                        DriverMenuSnapshot::Status(check_driver_install_status(&context))
+                    }
+                    Err(error) => {
+                        log::error!("CrossPuck driver uninstall failed: {error}");
+                        DriverMenuSnapshot::UninstallFailed {
                             message: short_menu_message(&error.to_string()),
                         }
                     }
@@ -536,31 +582,59 @@ mod macos {
             match snapshot {
                 DriverMenuSnapshot::Checking => DriverMenuView {
                     status_title: "Driver: Checking...".to_string(),
-                    action_title: "Install Steam Driver...".to_string(),
-                    action_enabled: false,
+                    install_title: "Install Steam Driver...".to_string(),
+                    install_enabled: false,
+                    uninstall_title: "Uninstall Steam Driver...".to_string(),
+                    uninstall_enabled: false,
                 },
                 DriverMenuSnapshot::Installing => DriverMenuView {
                     status_title: "Driver: Installing...".to_string(),
-                    action_title: "Installing...".to_string(),
-                    action_enabled: false,
+                    install_title: "Installing...".to_string(),
+                    install_enabled: false,
+                    uninstall_title: "Uninstall Steam Driver...".to_string(),
+                    uninstall_enabled: false,
                 },
-                DriverMenuSnapshot::Status(status) => DriverMenuView {
-                    status_title: status.status_title,
-                    action_title: status.action_title,
-                    action_enabled: status.action_enabled,
+                DriverMenuSnapshot::Uninstalling => DriverMenuView {
+                    status_title: "Driver: Uninstalling...".to_string(),
+                    install_title: "Install Steam Driver...".to_string(),
+                    install_enabled: false,
+                    uninstall_title: "Uninstalling...".to_string(),
+                    uninstall_enabled: false,
                 },
+                DriverMenuSnapshot::Status(status) => {
+                    let uninstall_enabled = status_allows_uninstall(&status);
+                    DriverMenuView {
+                        status_title: status.status_title,
+                        install_title: status.action_title,
+                        install_enabled: status.action_enabled,
+                        uninstall_title: "Uninstall Steam Driver...".to_string(),
+                        uninstall_enabled,
+                    }
+                }
                 DriverMenuSnapshot::InstallFailed { message } => DriverMenuView {
                     status_title: format!("Driver: Install failed: {message}"),
-                    action_title: "Retry Steam Driver...".to_string(),
-                    action_enabled: true,
+                    install_title: "Retry Steam Driver...".to_string(),
+                    install_enabled: true,
+                    uninstall_title: "Uninstall Steam Driver...".to_string(),
+                    uninstall_enabled: false,
+                },
+                DriverMenuSnapshot::UninstallFailed { message } => DriverMenuView {
+                    status_title: format!("Driver: Uninstall failed: {message}"),
+                    install_title: "Install Steam Driver...".to_string(),
+                    install_enabled: false,
+                    uninstall_title: "Retry Uninstall...".to_string(),
+                    uninstall_enabled: true,
                 },
             }
         }
 
         fn is_installing(&self) -> bool {
-            self.snapshot
-                .lock()
-                .is_ok_and(|snapshot| matches!(*snapshot, DriverMenuSnapshot::Installing))
+            self.snapshot.lock().is_ok_and(|snapshot| {
+                matches!(
+                    *snapshot,
+                    DriverMenuSnapshot::Installing | DriverMenuSnapshot::Uninstalling
+                )
+            })
         }
     }
 
@@ -579,8 +653,29 @@ mod macos {
         match snapshot {
             DriverMenuSnapshot::Status(status) => status.action_enabled,
             DriverMenuSnapshot::InstallFailed { .. } => true,
-            DriverMenuSnapshot::Checking | DriverMenuSnapshot::Installing => false,
+            DriverMenuSnapshot::Checking
+            | DriverMenuSnapshot::Installing
+            | DriverMenuSnapshot::Uninstalling
+            | DriverMenuSnapshot::UninstallFailed { .. } => false,
         }
+    }
+
+    fn driver_snapshot_allows_uninstall(snapshot: &DriverMenuSnapshot) -> bool {
+        match snapshot {
+            DriverMenuSnapshot::Status(status) => status_allows_uninstall(status),
+            DriverMenuSnapshot::UninstallFailed { .. } => true,
+            DriverMenuSnapshot::Checking
+            | DriverMenuSnapshot::Installing
+            | DriverMenuSnapshot::Uninstalling
+            | DriverMenuSnapshot::InstallFailed { .. } => false,
+        }
+    }
+
+    fn status_allows_uninstall(status: &DriverInstallStatus) -> bool {
+        matches!(
+            status.state,
+            DriverInstallState::Installed | DriverInstallState::UpdateAvailable
+        )
     }
 
     unsafe fn bundle_resources_dir() -> Option<PathBuf> {

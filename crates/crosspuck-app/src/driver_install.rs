@@ -6,6 +6,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const BOTTLE_PATH_ENV: &str = "CROSSPUCK_BOTTLE_PATH";
@@ -15,14 +16,33 @@ const DRIVER_TARGET_RELATIVE_PATH: &[&str] =
     &["target", "x86_64-pc-windows-gnu", "release", "hid.dll"];
 const CROSSOVER_BOTTLES_RELATIVE_PATH: &[&str] =
     &["Library", "Application Support", "CrossOver", "Bottles"];
+const HID_DLL_OVERRIDE_VALUE: &str = "native,builtin";
+const WINE_HID_OVERRIDE_REG_FILE_NAME: &str = "crosspuck-wine-override.reg";
+const USER_REG_FILE_NAME: &str = "user.reg";
+const USER_REG_DLL_OVERRIDES_SECTION: &str = r"[Software\\Wine\\DllOverrides]";
+const USER_REG_HID_OVERRIDE_NAME: &str = "hid";
+const CX_BOTTLE_CONF_FILE_NAME: &str = "cxbottle.conf";
+const CROSSOVER_APP_PATH: &str = "/Applications/CrossOver.app";
+const CROSSOVER_PREVIEW_APP_PATH: &str = "/Applications/CrossOver Preview.app";
+const CROSSOVER_HOSTED_WINE_RELATIVE_PATH: &[&str] = &[
+    "Contents",
+    "SharedSupport",
+    "CrossOver",
+    "CrossOver-Hosted Application",
+    "wine",
+];
+const CROSSOVER_BIN_WINE_RELATIVE_PATH: &[&str] =
+    &["Contents", "SharedSupport", "CrossOver", "bin", "wine"];
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DriverInstallContext {
     pub resources_dir: Option<PathBuf>,
     pub embedded_driver_path: Option<PathBuf>,
     pub repo_root: Option<PathBuf>,
     pub bottle_path: Option<PathBuf>,
     pub crossover_bottles_dir: Option<PathBuf>,
+    pub crossover_app_paths: Vec<PathBuf>,
+    pub manage_wine_registry: bool,
     pub allow_development_fallbacks: bool,
 }
 
@@ -63,16 +83,41 @@ pub struct DriverInstallResult {
     pub target_dll: PathBuf,
     pub backup_path: Option<PathBuf>,
     pub installed_sha256: String,
+    pub registry_targets: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DriverUninstallResult {
+    pub target_dll: PathBuf,
+    pub removed_driver: bool,
+    pub registry_targets: Vec<String>,
 }
 
 #[derive(Debug)]
 pub enum DriverInstallError {
     Bundle(BundleError),
     BottleNotFound,
-    SteamExeNotFound { bottle_path: PathBuf },
+    SteamExeNotFound {
+        bottle_path: PathBuf,
+    },
     System32TargetRefused(PathBuf),
-    VerificationFailed { expected: String, actual: String },
-    Io { path: PathBuf, source: io::Error },
+    VerificationFailed {
+        expected: String,
+        actual: String,
+    },
+    CrossoverWineNotFound {
+        bottle_path: PathBuf,
+    },
+    RegistryImportFailed {
+        wine_path: PathBuf,
+        status: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl DriverInstallContext {
@@ -83,7 +128,24 @@ impl DriverInstallContext {
             repo_root: Some(default_repo_root()),
             bottle_path: env::var_os(BOTTLE_PATH_ENV).map(PathBuf::from),
             crossover_bottles_dir: default_crossover_bottles_dir(),
+            crossover_app_paths: default_crossover_app_paths(),
+            manage_wine_registry: true,
             allow_development_fallbacks: cfg!(debug_assertions),
+        }
+    }
+}
+
+impl Default for DriverInstallContext {
+    fn default() -> Self {
+        Self {
+            resources_dir: None,
+            embedded_driver_path: None,
+            repo_root: None,
+            bottle_path: None,
+            crossover_bottles_dir: None,
+            crossover_app_paths: Vec::new(),
+            manage_wine_registry: true,
+            allow_development_fallbacks: false,
         }
     }
 }
@@ -128,10 +190,12 @@ pub fn install_driver_with_timestamp(
         let installed_sha256 =
             bundle::sha256_file(&target_dll).map_err(DriverInstallError::Bundle)?;
         if installed_sha256 == embedded_driver.actual_sha256 {
+            let registry_targets = apply_hid_registry_override(context, &bottle_path)?;
             return Ok(DriverInstallResult {
                 target_dll,
                 backup_path: None,
                 installed_sha256,
+                registry_targets,
             });
         }
     }
@@ -155,10 +219,31 @@ pub fn install_driver_with_timestamp(
         });
     }
 
+    let registry_targets = apply_hid_registry_override(context, &bottle_path)?;
+
     Ok(DriverInstallResult {
         target_dll,
         backup_path,
         installed_sha256,
+        registry_targets,
+    })
+}
+
+pub fn uninstall_driver(
+    context: &DriverInstallContext,
+) -> Result<DriverUninstallResult, DriverInstallError> {
+    let bottle_path = discover_bottle(context).ok_or(DriverInstallError::BottleNotFound)?;
+    let steam_dir =
+        find_steam_dir(&bottle_path).ok_or_else(|| DriverInstallError::SteamExeNotFound {
+            bottle_path: bottle_path.clone(),
+        })?;
+    let target_dll = install_target_for_steam_dir(&steam_dir)?;
+    let removed_driver = remove_file_if_exists(&target_dll)?;
+
+    Ok(DriverUninstallResult {
+        target_dll,
+        removed_driver,
+        registry_targets: Vec::new(),
     })
 }
 
@@ -283,13 +368,21 @@ fn check_driver_install_status_with_embedded(
     }
 
     let installed_sha256 = bundle::sha256_file(&target_dll).map_err(DriverInstallError::Bundle)?;
+    let registry_override_installed = is_hid_registry_override_installed(context, &bottle_path)?;
     let (state, status_title, action_title, action_enabled) =
-        if installed_sha256 == embedded_driver.actual_sha256 {
+        if installed_sha256 == embedded_driver.actual_sha256 && registry_override_installed {
             (
                 DriverInstallState::Installed,
                 "Driver: Already installed.",
-                "Already installed.",
-                false,
+                "Repair Steam Driver...",
+                true,
+            )
+        } else if installed_sha256 == embedded_driver.actual_sha256 {
+            (
+                DriverInstallState::UpdateAvailable,
+                "Driver: Wine override missing.",
+                "Repair Steam Driver...",
+                true,
             )
         } else {
             (
@@ -470,6 +563,237 @@ fn atomic_copy(from: &Path, to: &Path) -> Result<(), DriverInstallError> {
     })
 }
 
+fn remove_file_if_exists(path: &Path) -> Result<bool, DriverInstallError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(DriverInstallError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn apply_hid_registry_override(
+    context: &DriverInstallContext,
+    bottle_path: &Path,
+) -> Result<Vec<String>, DriverInstallError> {
+    if !context.manage_wine_registry {
+        return Ok(Vec::new());
+    }
+
+    let reg_file_path = write_hid_override_reg_file(bottle_path)?;
+    let tool = find_crossover_wine_tool(context, bottle_path)?;
+    import_registry_file(&tool, bottle_path, &reg_file_path)?;
+    Ok(vec![format!(
+        "{}: {}",
+        tool.app_name(),
+        reg_file_path.display()
+    )])
+}
+
+fn is_hid_registry_override_installed(
+    context: &DriverInstallContext,
+    bottle_path: &Path,
+) -> Result<bool, DriverInstallError> {
+    if !context.manage_wine_registry {
+        return Ok(true);
+    }
+
+    Ok(read_user_reg_hid_override(bottle_path)?.as_deref() == Some(HID_DLL_OVERRIDE_VALUE))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CrossoverWineTool {
+    app_path: PathBuf,
+    wine_path: PathBuf,
+}
+
+impl CrossoverWineTool {
+    fn app_name(&self) -> String {
+        self.app_path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("CrossOver")
+            .to_string()
+    }
+}
+
+fn write_hid_override_reg_file(bottle_path: &Path) -> Result<PathBuf, DriverInstallError> {
+    let reg_file_path = bottle_path.join(WINE_HID_OVERRIDE_REG_FILE_NAME);
+    let contents = format!(
+        "Windows Registry Editor Version 5.00\r\n\r\n\
+         [HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]\r\n\
+         \"{USER_REG_HID_OVERRIDE_NAME}\"=\"{HID_DLL_OVERRIDE_VALUE}\"\r\n"
+    );
+    fs::write(&reg_file_path, contents).map_err(|source| DriverInstallError::Io {
+        path: reg_file_path.clone(),
+        source,
+    })?;
+    Ok(reg_file_path)
+}
+
+fn find_crossover_wine_tool(
+    context: &DriverInstallContext,
+    bottle_path: &Path,
+) -> Result<CrossoverWineTool, DriverInstallError> {
+    let mut app_paths = context.crossover_app_paths.clone();
+    if bottle_prefers_preview(bottle_path) {
+        app_paths.sort_by_key(|path| !is_crossover_preview_app(path));
+    } else {
+        app_paths.sort_by_key(|path| is_crossover_preview_app(path));
+    }
+
+    for app_path in app_paths {
+        for relative_path in [
+            CROSSOVER_HOSTED_WINE_RELATIVE_PATH,
+            CROSSOVER_BIN_WINE_RELATIVE_PATH,
+        ] {
+            let wine_path = relative_path
+                .iter()
+                .fold(app_path.clone(), |path, segment| path.join(segment));
+            if wine_path.is_file() {
+                return Ok(CrossoverWineTool {
+                    app_path: app_path.clone(),
+                    wine_path,
+                });
+            }
+        }
+    }
+
+    Err(DriverInstallError::CrossoverWineNotFound {
+        bottle_path: bottle_path.to_path_buf(),
+    })
+}
+
+fn import_registry_file(
+    tool: &CrossoverWineTool,
+    bottle_path: &Path,
+    reg_file_path: &Path,
+) -> Result<(), DriverInstallError> {
+    let bottle_name = bottle_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or(DEFAULT_STEAM_BOTTLE_NAME);
+    let output = Command::new(&tool.wine_path)
+        .arg("--bottle")
+        .arg(bottle_name)
+        .arg("--no-gui")
+        .arg("regedit")
+        .arg("/S")
+        .arg(reg_file_path)
+        .output()
+        .map_err(|source| DriverInstallError::Io {
+            path: tool.wine_path.clone(),
+            source,
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(DriverInstallError::RegistryImportFailed {
+        wine_path: tool.wine_path.clone(),
+        status: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+fn bottle_prefers_preview(bottle_path: &Path) -> bool {
+    let config_path = bottle_path.join(CX_BOTTLE_CONF_FILE_NAME);
+    let Ok(config) = fs::read_to_string(config_path) else {
+        return false;
+    };
+    config.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("\"Preview\"") && line.rsplit('"').nth(1) == Some("1")
+    })
+}
+
+fn is_crossover_preview_app(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| name.eq_ignore_ascii_case("CrossOver Preview.app"))
+}
+
+fn user_reg_path(bottle_path: &Path) -> PathBuf {
+    bottle_path.join(USER_REG_FILE_NAME)
+}
+
+fn read_user_reg_hid_override(bottle_path: &Path) -> Result<Option<String>, DriverInstallError> {
+    let path = user_reg_path(bottle_path);
+    let text = read_user_reg(&path)?;
+    Ok(find_user_reg_hid_override(&text))
+}
+
+fn read_user_reg(path: &Path) -> Result<String, DriverInstallError> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            Ok("WINE REGISTRY Version 2\n\n".to_string())
+        }
+        Err(source) => Err(DriverInstallError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn find_user_reg_hid_override(text: &str) -> Option<String> {
+    for line in user_reg_dll_override_lines(text) {
+        if let Some(value) = parse_user_reg_sz_value(line, USER_REG_HID_OVERRIDE_NAME) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn user_reg_dll_override_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut in_section = false;
+    text.lines().filter(move |line| {
+        if line.starts_with('[') {
+            in_section = line.starts_with(USER_REG_DLL_OVERRIDES_SECTION);
+            return false;
+        }
+        in_section
+    })
+}
+
+fn parse_user_reg_sz_value(line: &str, expected_name: &str) -> Option<String> {
+    let name = parse_user_reg_value_name(line)?;
+    if name != expected_name {
+        return None;
+    }
+    let value_start = line.find("=\"")? + 2;
+    let value_end = line.rfind('"')?;
+    (value_start <= value_end).then(|| unescape_user_reg_string(&line[value_start..value_end]))
+}
+
+fn parse_user_reg_value_name(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    if !line.starts_with('"') {
+        return None;
+    }
+    let name_end = line[1..].find('"')? + 1;
+    Some(unescape_user_reg_string(&line[1..name_end]))
+}
+
+fn unescape_user_reg_string(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                output.push(next);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 fn default_backup_timestamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -494,6 +818,13 @@ fn default_crossover_bottles_dir() -> Option<PathBuf> {
     )
 }
 
+fn default_crossover_app_paths() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from(CROSSOVER_APP_PATH),
+        PathBuf::from(CROSSOVER_PREVIEW_APP_PATH),
+    ]
+}
+
 impl fmt::Display for DriverInstallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -510,6 +841,31 @@ impl fmt::Display for DriverInstallError {
             Self::VerificationFailed { expected, actual } => write!(
                 f,
                 "installed driver digest mismatch: expected {expected}, got {actual}"
+            ),
+            Self::CrossoverWineNotFound { bottle_path } => write!(
+                f,
+                "CrossOver wine command not found for Steam bottle at {}",
+                bottle_path.display()
+            ),
+            Self::RegistryImportFailed {
+                wine_path,
+                status,
+                stdout,
+                stderr,
+            } => write!(
+                f,
+                "failed to import Wine override with {} (status {}): {}{}{}",
+                wine_path.display(),
+                status
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "terminated".to_string()),
+                stderr,
+                if stdout.is_empty() || stderr.is_empty() {
+                    ""
+                } else {
+                    " / "
+                },
+                stdout
             ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
         }
@@ -530,6 +886,7 @@ impl std::error::Error for DriverInstallError {
 mod tests {
     use super::*;
     use crate::bundle::{DRIVER_DLL_NAME, DRIVER_MANIFEST_NAME, GUEST_DRIVER_DIR};
+    use std::os::unix::fs::PermissionsExt;
 
     struct TestDir(PathBuf);
 
@@ -587,12 +944,13 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_already_installed_and_disables_action() {
+    fn status_reports_already_installed_and_allows_repair() {
         let dir = TestDir::new("installed");
         let resources = write_embedded_driver(dir.path(), b"embedded");
         let bottle = write_bottle_with_steam(dir.path(), DEFAULT_STEAM_BOTTLE_NAME);
         let steam_dir = bottle.join("drive_c/Program Files/Steam");
         fs::write(steam_dir.join("hid.dll"), b"embedded").unwrap();
+        write_user_reg_with_overrides(&bottle, &[("hid", HID_DLL_OVERRIDE_VALUE)]);
 
         let status = check_driver_install_status(&DriverInstallContext {
             resources_dir: Some(resources),
@@ -602,8 +960,29 @@ mod tests {
 
         assert_eq!(status.state, DriverInstallState::Installed);
         assert_eq!(status.status_title, "Driver: Already installed.");
-        assert_eq!(status.action_title, "Already installed.");
-        assert!(!status.action_enabled);
+        assert_eq!(status.action_title, "Repair Steam Driver...");
+        assert!(status.action_enabled);
+    }
+
+    #[test]
+    fn status_reports_repair_when_registry_override_is_missing() {
+        let dir = TestDir::new("registry-status-missing");
+        let resources = write_embedded_driver(dir.path(), b"embedded");
+        let bottle = write_bottle_with_steam(dir.path(), DEFAULT_STEAM_BOTTLE_NAME);
+        let steam_dir = bottle.join("drive_c/Program Files/Steam");
+        fs::write(steam_dir.join("hid.dll"), b"embedded").unwrap();
+        write_user_reg_with_overrides(&bottle, &[("msi", "builtin")]);
+
+        let status = check_driver_install_status(&DriverInstallContext {
+            resources_dir: Some(resources),
+            crossover_bottles_dir: Some(dir.path().to_path_buf()),
+            ..DriverInstallContext::default()
+        });
+
+        assert_eq!(status.state, DriverInstallState::UpdateAvailable);
+        assert_eq!(status.status_title, "Driver: Wine override missing.");
+        assert_eq!(status.action_title, "Repair Steam Driver...");
+        assert!(status.action_enabled);
     }
 
     #[test]
@@ -661,6 +1040,7 @@ mod tests {
             &DriverInstallContext {
                 resources_dir: Some(resources),
                 crossover_bottles_dir: Some(dir.path().to_path_buf()),
+                manage_wine_registry: false,
                 ..DriverInstallContext::default()
             },
             "20260526-120000",
@@ -689,6 +1069,7 @@ mod tests {
             &DriverInstallContext {
                 resources_dir: Some(resources),
                 crossover_bottles_dir: Some(dir.path().to_path_buf()),
+                manage_wine_registry: false,
                 ..DriverInstallContext::default()
             },
             "20260526-120000",
@@ -697,6 +1078,108 @@ mod tests {
 
         assert_eq!(result.backup_path, None);
         assert!(!steam_dir.join("crosspuck-backups").exists());
+    }
+
+    #[test]
+    fn install_imports_generated_registry_override() {
+        let dir = TestDir::new("registry-install");
+        let resources = write_embedded_driver(dir.path(), b"embedded");
+        let bottle = write_bottle_with_steam(dir.path(), DEFAULT_STEAM_BOTTLE_NAME);
+        let (crossover_app, wine_log) = write_fake_crossover_app(dir.path(), "CrossOver.app");
+        write_user_reg_with_overrides(&bottle, &[("msi", "builtin"), ("hid", "builtin")]);
+
+        let result = install_driver_with_timestamp(
+            &DriverInstallContext {
+                resources_dir: Some(resources),
+                crossover_bottles_dir: Some(dir.path().to_path_buf()),
+                crossover_app_paths: vec![crossover_app],
+                manage_wine_registry: true,
+                ..DriverInstallContext::default()
+            },
+            "20260526-120000",
+        )
+        .unwrap();
+
+        assert_eq!(result.registry_targets.len(), 1);
+        assert!(result.registry_targets[0].starts_with("CrossOver.app: "));
+        assert_eq!(
+            read_user_reg_hid_override(&bottle).unwrap(),
+            Some(HID_DLL_OVERRIDE_VALUE.to_string())
+        );
+        assert!(fs::read_to_string(user_reg_path(&bottle))
+            .unwrap()
+            .contains("\"msi\"=\"builtin\""));
+        let reg_file_path = bottle.join(WINE_HID_OVERRIDE_REG_FILE_NAME);
+        let reg_file = fs::read_to_string(&reg_file_path).unwrap();
+        assert!(reg_file.contains("[HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]"));
+        assert!(reg_file.contains("\"hid\"=\"native,builtin\""));
+        let log = fs::read_to_string(wine_log).unwrap();
+        assert!(log.contains("--bottle Steam --no-gui regedit /S"));
+        assert!(log.contains(reg_file_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn install_uses_preview_crossover_for_preview_bottle() {
+        let dir = TestDir::new("registry-preview");
+        let resources = write_embedded_driver(dir.path(), b"embedded");
+        let bottle = write_bottle_with_steam(dir.path(), DEFAULT_STEAM_BOTTLE_NAME);
+        let (stable_app, stable_log) = write_fake_crossover_app(dir.path(), "CrossOver.app");
+        let (preview_app, preview_log) =
+            write_fake_crossover_app(dir.path(), "CrossOver Preview.app");
+        fs::write(
+            bottle.join(CX_BOTTLE_CONF_FILE_NAME),
+            "\"Preview\" = \"1\"\n",
+        )
+        .unwrap();
+        write_user_reg_with_overrides(&bottle, &[("msi", "builtin")]);
+
+        install_driver_with_timestamp(
+            &DriverInstallContext {
+                resources_dir: Some(resources),
+                crossover_bottles_dir: Some(dir.path().to_path_buf()),
+                crossover_app_paths: vec![stable_app, preview_app],
+                manage_wine_registry: true,
+                ..DriverInstallContext::default()
+            },
+            "20260526-120000",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_user_reg_hid_override(&bottle).unwrap(),
+            Some(HID_DLL_OVERRIDE_VALUE.to_string())
+        );
+        assert!(!stable_log.exists());
+        assert!(fs::read_to_string(preview_log)
+            .unwrap()
+            .contains("--bottle Steam --no-gui regedit /S"));
+    }
+
+    #[test]
+    fn uninstall_removes_driver_without_changing_registry() {
+        let dir = TestDir::new("registry-uninstall");
+        let resources = write_embedded_driver(dir.path(), b"embedded");
+        let bottle = write_bottle_with_steam(dir.path(), DEFAULT_STEAM_BOTTLE_NAME);
+        let steam_dir = bottle.join("drive_c/Program Files/Steam");
+        fs::write(steam_dir.join("hid.dll"), b"embedded").unwrap();
+        write_user_reg_with_overrides(
+            &bottle,
+            &[("msi", "builtin"), ("hid", HID_DLL_OVERRIDE_VALUE)],
+        );
+        let before = fs::read_to_string(user_reg_path(&bottle)).unwrap();
+
+        let result = uninstall_driver(&DriverInstallContext {
+            resources_dir: Some(resources),
+            crossover_bottles_dir: Some(dir.path().to_path_buf()),
+            manage_wine_registry: true,
+            ..DriverInstallContext::default()
+        })
+        .unwrap();
+
+        assert!(result.removed_driver);
+        assert!(!result.target_dll.exists());
+        assert!(result.registry_targets.is_empty());
+        assert_eq!(fs::read_to_string(user_reg_path(&bottle)).unwrap(), before);
     }
 
     #[test]
@@ -741,5 +1224,70 @@ mod tests {
         fs::create_dir_all(&steam_dir).unwrap();
         fs::write(steam_dir.join("Steam.exe"), b"").unwrap();
         bottle
+    }
+
+    fn write_fake_crossover_app(root: &Path, app_name: &str) -> (PathBuf, PathBuf) {
+        let app_path = root.join(app_name);
+        let wine_path = CROSSOVER_HOSTED_WINE_RELATIVE_PATH
+            .iter()
+            .fold(app_path.clone(), |path, segment| path.join(segment));
+        fs::create_dir_all(wine_path.parent().unwrap()).unwrap();
+        let log_path = root.join(format!(
+            "{}.log",
+            app_name
+                .trim_end_matches(".app")
+                .replace(' ', "-")
+                .to_ascii_lowercase()
+        ));
+        fs::write(
+            &wine_path,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> {}
+last=''
+for arg in "$@"; do
+  last="$arg"
+done
+bottle_dir=$(dirname "$last")
+cat > "$bottle_dir/user.reg" <<'EOF'
+WINE REGISTRY Version 2
+
+[Software\\Wine\\DllOverrides] 1
+#time=1
+"msi"="builtin"
+"hid"="native,builtin"
+
+[Software\\Wine\\Other] 1
+"preserved"="yes"
+EOF
+"#,
+                shell_quote(&log_path)
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&wine_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wine_path, permissions).unwrap();
+        (app_path, log_path)
+    }
+
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+    }
+
+    fn write_user_reg_with_overrides(bottle: &Path, overrides: &[(&str, &str)]) {
+        let mut lines = vec![
+            "WINE REGISTRY Version 2".to_string(),
+            String::new(),
+            "[Software\\\\Wine\\\\DllOverrides] 1".to_string(),
+            "#time=1".to_string(),
+        ];
+        for (name, value) in overrides {
+            lines.push(format!("\"{name}\"=\"{value}\""));
+        }
+        lines.push(String::new());
+        lines.push("[Software\\\\Wine\\\\Other] 1".to_string());
+        lines.push("\"preserved\"=\"yes\"".to_string());
+        fs::write(user_reg_path(bottle), lines.join("\n")).unwrap();
     }
 }

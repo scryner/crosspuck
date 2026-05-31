@@ -60,6 +60,13 @@ listen for guest connections but cannot open the Steam Controller HID device.
 If permission was denied earlier, enable it in System Settings, then restart
 CrossPuck.
 
+Use the menu bar "Install Steam Driver..." item to deploy the embedded
+`hid.dll` into the Steam bottle. The app writes
+`crosspuck-wine-override.reg` in the bottle and imports it with the matching
+CrossOver `regedit`, setting Wine's `hid=native,builtin` DLL override without
+rewriting `user.reg` directly. Updating or repairing the driver re-imports the
+same registry file. Uninstalling removes only the app-local `hid.dll`.
+
 ## Build The Guest Driver
 
 Build the production guest `hid.dll`:
@@ -75,6 +82,10 @@ target/x86_64-pc-windows-gnu/release/hid.dll
 ```
 
 ## Install Into CrossOver
+
+The menu bar app handles driver install/update/uninstall automatically.
+Install, update, and repair also import the Wine loader override registry file.
+The shell installer below is mainly for manual development and smoke testing.
 
 Install the driver next to `Steam.exe` in the target bottle:
 
@@ -101,14 +112,14 @@ Do not install this DLL into `drive_c/windows/system32`. It is designed to live
 next to Steam and forward non-virtual HID calls to the real system HID DLL.
 
 If CrossOver needs an explicit loader override for the app-local `hid.dll`, ask
-the installer to write a loader-only registry file:
+the installer to write and import a loader-only registry file:
 
 ```sh
 tools/install-driver.sh --bottle Steam --write-wine-override
 ```
 
 That file only sets Wine's `hid=native,builtin` DLL override. It does not set
-guest runtime options.
+guest runtime options or rewrite `user.reg` directly.
 
 ## Tools And Diagnostics
 

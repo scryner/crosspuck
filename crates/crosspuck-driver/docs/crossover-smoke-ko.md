@@ -78,19 +78,19 @@ drive_c/windows/system32/hid.dll
 
 ## 3. 선택 사항: Wine loader override
 
-CrossOver가 `steam.exe` 옆 app-local `hid.dll`을 로드하지 않는 경우에만 loader-only Wine override 파일을 생성합니다.
+CrossOver가 `steam.exe` 옆 app-local `hid.dll`을 로드하지 않는 경우에만 loader-only Wine override 파일을 생성하고 import합니다.
 
 ```sh
 tools/install-driver.sh --bottle Steam --write-wine-override
 ```
 
-생성되는 registry 파일:
+생성 후 bottle에 남는 registry 파일:
 
 ```text
 ~/Library/Application Support/CrossOver/Bottles/Steam/crosspuck-wine-override.reg
 ```
 
-CrossOver에서 Steam bottle을 선택한 뒤 Run Command로 `regedit`를 실행하고, 위 `.reg` 파일을 import합니다. 이 파일은 runtime 설정이 아니라 loader 설정만 담습니다.
+스크립트가 같은 bottle의 CrossOver `regedit`로 위 `.reg` 파일을 import합니다. 이 파일은 runtime 설정이 아니라 loader 설정만 담습니다.
 
 설정되는 DLL override:
 

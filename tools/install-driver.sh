@@ -22,7 +22,7 @@ Options:
   --steam-dir PATH       Steam directory inside the bottle. Auto-detected from Steam.exe.
   --log-file PATH        Unix path for the driver log file. Defaults to the Steam directory.
   --no-build             Do not build the driver before copying --driver.
-  --write-wine-override  Write a loader-only registry file for hid=native,builtin.
+  --write-wine-override  Write and import a loader-only registry file for hid=native,builtin.
   --help                 Show this help.
 
 The script intentionally does not install into drive_c/windows/system32 because
@@ -41,6 +41,7 @@ steam_dir=""
 log_file=""
 no_build="0"
 write_wine_override="0"
+wine_override_imported="0"
 
 ensure_driver_target_installed() {
   if ! command -v rustup >/dev/null 2>&1; then
@@ -73,6 +74,31 @@ build_driver() {
     -p crosspuck-driver \
     --release \
     --target "$driver_target"
+}
+
+find_crossover_wine() {
+  local app_paths=()
+  if [[ -f "$bottle_path/cxbottle.conf" ]] && grep -Eq '^[[:space:]]*"Preview"[[:space:]]*=[[:space:]]*"1"' "$bottle_path/cxbottle.conf"; then
+    app_paths=("/Applications/CrossOver Preview.app" "/Applications/CrossOver.app")
+  else
+    app_paths=("/Applications/CrossOver.app" "/Applications/CrossOver Preview.app")
+  fi
+
+  local app_path
+  for app_path in "${app_paths[@]}"; do
+    local hosted="$app_path/Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/wine"
+    local bin="$app_path/Contents/SharedSupport/CrossOver/bin/wine"
+    if [[ -f "$hosted" ]]; then
+      printf '%s\n' "$hosted"
+      return 0
+    fi
+    if [[ -f "$bin" ]]; then
+      printf '%s\n' "$bin"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 while [[ $# -gt 0 ]]; do
@@ -197,6 +223,12 @@ Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]
 "hid"="native,builtin"
 EOF
+  crossover_wine="$(find_crossover_wine)" || {
+    echo "Could not find CrossOver wine command to import $wine_override_file" >&2
+    exit 1
+  }
+  "$crossover_wine" --bottle "$bottle_name" --no-gui regedit /S "$wine_override_file"
+  wine_override_imported="1"
 fi
 
 cat <<EOF
@@ -212,6 +244,8 @@ if [[ -n "$wine_override_file" ]]; then
 
 Generated loader-only Wine override registry file:
   $wine_override_file
+Imported Wine override:
+  $wine_override_imported
 EOF
 fi
 
