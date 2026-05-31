@@ -61,20 +61,18 @@ The script:
 
 - copies `hid.dll` into the detected Steam directory,
 - backs up an existing local `hid.dll` under `crosspuck-backups/`,
-- initializes `crosspuck-driver.log` in the Steam directory.
+- initializes `crosspuck-driver.log` in the Steam directory,
+- writes `crosspuck-wine-override.reg` in the bottle and imports it with
+  CrossOver `regedit`.
 
 The installer does not write guest runtime `CROSSPUCK_*` registry/environment
 settings. Guest runtime settings use built-in defaults unless the macOS host app
 sends overrides over the bridge connection.
 
-## Optional Wine Loader Override
+## Wine Loader Override
 
-If CrossOver does not load the app-local `hid.dll` next to `Steam.exe`, generate
-and import a loader-only Wine override registry file:
-
-```sh
-tools/install-driver.sh --bottle Steam --write-wine-override
-```
+The install script generates and imports the loader-only Wine override registry
+file automatically.
 
 The generated file is kept in the same bottle:
 

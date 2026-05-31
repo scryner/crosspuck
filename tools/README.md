@@ -8,13 +8,15 @@ scripts have been removed; use the current `tools/*.sh` commands below.
 
 ## CrossOver Install
 
-The CrossPuck menu bar app installs, updates, and uninstalls the driver.
-Install, update, and repair also import the generated Wine loader override
-registry file with CrossOver `regedit`; uninstall does not change Wine registry
-settings. These shell commands are for manual development and smoke-test
+The CrossPuck menu bar app is the preferred installer. It installs, updates,
+and uninstalls the driver; install, update, and repair also import the generated
+Wine loader override registry file with CrossOver `regedit`. Uninstall removes
+only the app-local `hid.dll` and intentionally leaves Wine registry settings
+unchanged. These shell commands are for manual development and smoke-test
 workflows.
 
-Install the production guest driver next to `Steam.exe`:
+Install the production guest driver next to `Steam.exe` and import the Wine
+loader override:
 
 ```sh
 tools/install-driver.sh --bottle Steam
@@ -30,14 +32,12 @@ tools/install-driver.sh \
 ```
 
 The script copies `hid.dll`, backs up any existing app-local `hid.dll`, and
-initializes `crosspuck-driver.log` next to Steam. It does not write guest
-runtime `CROSSPUCK_*` registry or environment settings. Guest runtime settings
-use built-in defaults unless the macOS host app sends overrides over the bridge
-connection.
-
-If CrossOver needs an explicit loader override for the app-local `hid.dll`, run
-with `--write-wine-override` to generate and import the loader-only registry
-file. This only sets `hid=native,builtin`; runtime settings remain host-owned.
+initializes `crosspuck-driver.log` next to Steam. It also writes
+`crosspuck-wine-override.reg` into the bottle and imports it with the matching
+CrossOver app, using CrossOver Preview first for preview-marked bottles and
+CrossOver first for regular bottles. It does not write guest runtime
+`CROSSPUCK_*` registry or environment settings. Guest runtime settings remain
+host-owned unless the macOS host app sends overrides over the bridge connection.
 
 Do not copy this DLL into `drive_c/windows/system32`. The driver is intended to
 be app-local and forwards non-virtual HID calls to the real system HID DLL.

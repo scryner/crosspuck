@@ -15,19 +15,76 @@ The project is split into two production pieces:
 Shared HID identity, transport, protocol, and guest runtime logic live in
 `crosspuck-core`. `crosspuck-cli` contains development and diagnostic tools.
 
-## Pre-requisites
+## Binary DMG Install
+
+Use these instructions when you have a released `.dmg` installer. Rust and the
+source tree are not required.
+
+### Requirements
+
+- macOS.
+- A CrossOver or CrossOver Preview Steam bottle.
+- Steam Puck/Controller visible to the macOS host.
+- Steam Puck/Controller paired with a native app on macOS or Windows.
+- A CrossPuck `.dmg` release.
+
+### Install CrossPuck
+
+1. Open the `.dmg`, then drag `CrossPuck.app` into `Applications`.
+2. Start `CrossPuck.app` once from `Applications`.
+3. Open Apple menu > `System Settings` > `Privacy & Security` >
+   `Input Monitoring`.
+4. Confirm that `CrossPuck.app` is listed and enabled. If it is missing, click
+   the add button (`+`), choose `/Applications/CrossPuck.app`, then enable it.
+   If an older CrossPuck entry points to a different location, remove that entry
+   and add the app from `Applications` again.
+5. Quit and restart CrossPuck after changing `Input Monitoring`.
+6. Quit Steam in the CrossOver bottle if it is already running.
+7. Use the CrossPuck menu bar "Install Steam Driver..." item. This installs
+   `hid.dll` next to `Steam.exe` and imports the Wine loader override registry
+   file.
+8. Keep CrossPuck running, then start Steam from the CrossOver bottle.
+
+The installer handles both `/Applications/CrossOver.app` and
+`/Applications/CrossOver Preview.app`. Preview-marked bottles import through
+CrossOver Preview first; regular bottles import through CrossOver first; the
+other app is used as a fallback when only one is installed.
+
+### Verify Wine DLL Override
+
+If Steam does not see the controller, verify the Wine DLL override manually:
+
+1. Open the CrossOver app that owns the Steam bottle. If both CrossOver and
+   CrossOver Preview are installed and you are unsure which owns the bottle,
+   check the Steam bottle in both apps.
+2. Select the Steam bottle.
+3. Open `Wine Configuration`.
+4. Open the `Libraries` tab.
+5. In `Existing overrides`, confirm that `hid (native, builtin)` is present.
+6. If it is missing, enter `hid` in `New override for library`, click `Add`,
+   select the new `hid` entry, click `Edit...`, choose `Native then Builtin`,
+   then click `OK`. Do not remove or replace other existing DLL overrides.
+7. Click `Apply`, then `OK`.
+
+## Source Build
+
+Use these instructions when building CrossPuck from this repository.
+
+### Requirements
 
 - macOS with Rust installed.
+- A checkout of this repository.
+- A CrossOver or CrossOver Preview Steam bottle.
 - Steam Puck/Controller visible to the macOS host.
-- Steam Puck/Controller paired with native app(on macOS or Windows).
-- CrossOver with Steam installed in a bottle.
-- Windows Rust target for the guest DLL:
+- Steam Puck/Controller paired with a native app on macOS or Windows.
+
+Install the Windows Rust target for the guest DLL:
 
 ```sh
 rustup target add x86_64-pc-windows-gnu
 ```
 
-## Build The Host App
+### Build The Host App
 
 Build a debug app bundle. The bundle includes the release guest `hid.dll` under
 `Contents/Resources/GuestDriver/`:
@@ -54,20 +111,26 @@ The embedded guest driver manifest is written to:
 CrossPuck.app/Contents/Resources/GuestDriver/manifest.json
 ```
 
+### Run The Built App And Install Driver
+
 Start the app before launching Steam in the CrossOver bottle. On macOS, grant
 CrossPuck Input Monitoring permission when prompted; without it the app can
 listen for guest connections but cannot open the Steam Controller HID device.
-If permission was denied earlier, enable it in System Settings, then restart
-CrossPuck.
+If permission was denied earlier, enable it in `System Settings` >
+`Privacy & Security` > `Input Monitoring`, then restart CrossPuck.
 
 Use the menu bar "Install Steam Driver..." item to deploy the embedded
-`hid.dll` into the Steam bottle. The app writes
-`crosspuck-wine-override.reg` in the bottle and imports it with the matching
+`hid.dll` next to `Steam.exe` in the Steam bottle. Install, update, and repair
+also write `crosspuck-wine-override.reg` into the bottle and import it with
 CrossOver `regedit`, setting Wine's `hid=native,builtin` DLL override without
-rewriting `user.reg` directly. Updating or repairing the driver re-imports the
-same registry file. Uninstalling removes only the app-local `hid.dll`.
+rewriting `user.reg` directly. The app supports both `/Applications/CrossOver.app`
+and `/Applications/CrossOver Preview.app`: preview-marked bottles import through
+CrossOver Preview first, regular bottles import through CrossOver first, and the
+other app is used as a fallback when only one is installed. Uninstalling removes
+only the app-local `hid.dll`; it intentionally leaves Wine registry settings
+unchanged.
 
-## Build The Guest Driver
+### Build The Guest Driver
 
 Build the production guest `hid.dll`:
 
@@ -81,13 +144,15 @@ The output is:
 target/x86_64-pc-windows-gnu/release/hid.dll
 ```
 
-## Install Into CrossOver
+### Manual Shell Install
 
-The menu bar app handles driver install/update/uninstall automatically.
-Install, update, and repair also import the Wine loader override registry file.
-The shell installer below is mainly for manual development and smoke testing.
+The menu bar app is the preferred installer. It handles driver
+install/update/uninstall automatically, and install/update/repair import the
+Wine loader override registry file as described above. The shell installer
+below is mainly for manual development and smoke testing.
 
-Install the driver next to `Steam.exe` in the target bottle:
+Install the driver next to `Steam.exe` in the target bottle and import the Wine
+loader override:
 
 ```sh
 tools/install-driver.sh --bottle Steam
@@ -103,23 +168,14 @@ tools/install-driver.sh \
 ```
 
 The script copies `hid.dll`, backs up any existing local `hid.dll`, and
-initializes `crosspuck-driver.log`. It does not write guest runtime
-`CROSSPUCK_*` registry or environment settings; guest runtime settings use
-built-in defaults unless the macOS host app sends overrides over the bridge
-connection.
+initializes `crosspuck-driver.log`. It also writes
+`crosspuck-wine-override.reg` into the bottle and imports it with the matching
+CrossOver app, using CrossOver Preview first for preview-marked bottles and
+CrossOver first for regular bottles. It does not set guest runtime options or
+rewrite `user.reg` directly.
 
 Do not install this DLL into `drive_c/windows/system32`. It is designed to live
 next to Steam and forward non-virtual HID calls to the real system HID DLL.
-
-If CrossOver needs an explicit loader override for the app-local `hid.dll`, ask
-the installer to write and import a loader-only registry file:
-
-```sh
-tools/install-driver.sh --bottle Steam --write-wine-override
-```
-
-That file only sets Wine's `hid=native,builtin` DLL override. It does not set
-guest runtime options or rewrite `user.reg` directly.
 
 ## Tools And Diagnostics
 

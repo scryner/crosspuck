@@ -64,6 +64,8 @@ tools/install-driver.sh \
 - `steam.exe`와 같은 디렉터리에 `hid.dll`을 복사합니다.
 - 기존 `hid.dll`이 있으면 `crosspuck-backups/` 아래에 백업합니다.
 - Steam 디렉터리에 `crosspuck-driver.log`를 초기화합니다.
+- bottle에 `crosspuck-wine-override.reg`를 생성하고 CrossOver `regedit`로
+  import합니다.
 - guest runtime용 `CROSSPUCK_*` registry/environment 값은 쓰지 않습니다.
   runtime 설정은 기본값을 쓰고, override가 필요한 값은 macOS host app이
   bridge connection으로 전달합니다.
@@ -76,13 +78,10 @@ drive_c/windows/system32/hid.dll
 
 에는 복사하지 않습니다. production driver는 non-virtual HID 호출을 real System32 `hid.dll`로 forwarding합니다.
 
-## 3. 선택 사항: Wine loader override
+## 3. Wine loader override
 
-CrossOver가 `steam.exe` 옆 app-local `hid.dll`을 로드하지 않는 경우에만 loader-only Wine override 파일을 생성하고 import합니다.
-
-```sh
-tools/install-driver.sh --bottle Steam --write-wine-override
-```
+설치 스크립트는 loader-only Wine override 파일을 자동으로 생성하고
+import합니다.
 
 생성 후 bottle에 남는 registry 파일:
 
