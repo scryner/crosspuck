@@ -84,6 +84,8 @@ mkdir -p "$macos_dir" "$resources_dir" "$guest_driver_dir"
 cp "$root_dir/target/$profile/CrossPuck" "$macos_dir/CrossPuck"
 cp "$root_dir/crates/crosspuck-app/Info.plist" "$contents_dir/Info.plist"
 cp -R "$root_dir/crates/crosspuck-app/Resources/." "$resources_dir/"
+cp "$root_dir/LICENSE" "$resources_dir/LICENSE"
+cp "$root_dir/THIRD-PARTY-NOTICES.md" "$resources_dir/THIRD-PARTY-NOTICES.md"
 cp "$driver_dll" "$guest_driver_dir/hid.dll"
 
 driver_sha256="$(sha256_file "$guest_driver_dir/hid.dll")"

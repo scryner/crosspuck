@@ -42,6 +42,35 @@ host-owned unless the macOS host app sends overrides over the bridge connection.
 Do not copy this DLL into `drive_c/windows/system32`. The driver is intended to
 be app-local and forwards non-virtual HID calls to the real system HID DLL.
 
+## DMG Packaging
+
+Build a release app bundle and package it into a drag-and-drop DMG:
+
+```sh
+tools/build-dmg.sh
+```
+
+The default output is:
+
+```text
+target/dmg/CrossPuck-0.1.0.dmg
+```
+
+The DMG opens in a conventional drag-and-drop Finder layout: a large
+`CrossPuck.app` icon on the left, an arrow in the middle, and an `Applications`
+symlink on the right. The mounted DMG volume uses the app's `CrossPuck.icns`
+icon. License files are embedded in the app bundle under `Contents/Resources`.
+For GitHub Actions release jobs, codesign the app first and then pass the signed
+app bundle to the DMG builder:
+
+```sh
+tools/build-dmg.sh --app target/release/CrossPuck.app
+```
+
+The script does not notarize. CI can run Apple notarization and stapling before
+or after this packaging step, depending on whether the release process notarizes
+the app bundle or the final DMG.
+
 ## Logging
 
 Host app logs use macOS Unified Logging.

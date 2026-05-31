@@ -111,6 +111,40 @@ The embedded guest driver manifest is written to:
 CrossPuck.app/Contents/Resources/GuestDriver/manifest.json
 ```
 
+License files are embedded in:
+
+```text
+CrossPuck.app/Contents/Resources/LICENSE
+CrossPuck.app/Contents/Resources/THIRD-PARTY-NOTICES.md
+```
+
+### Build A DMG
+
+Create a drag-and-drop installer DMG from the release app bundle:
+
+```sh
+tools/build-dmg.sh
+```
+
+The default output is:
+
+```text
+target/dmg/CrossPuck-0.1.0.dmg
+```
+
+The DMG opens in a conventional drag-and-drop Finder layout: a large
+`CrossPuck.app` icon on the left, an arrow in the middle, and an `Applications`
+symlink on the right. The mounted DMG volume uses the app's `CrossPuck.icns`
+icon. For CI release automation, build and codesign the app first, then package
+that signed app:
+
+```sh
+tools/build-dmg.sh --app target/release/CrossPuck.app
+```
+
+The script does not notarize. GitHub Actions can notarize and staple the signed
+app before packaging, or notarize and staple the generated DMG after packaging.
+
 ### Run The Built App And Install Driver
 
 Start the app before launching Steam in the CrossOver bottle. On macOS, grant
