@@ -5,7 +5,7 @@
   <key>CFBundleExecutable</key>
   <string>CrossPuck</string>
   <key>CFBundleIdentifier</key>
-  <string>dev.crosspuck.host</string>
+  <string>com.github.scryner.crosspuck</string>
   <key>CFBundleName</key>
   <string>CrossPuck</string>
   <key>CFBundlePackageType</key>

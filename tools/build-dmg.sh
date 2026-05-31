@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  tools/build-dmg.sh [--profile debug|release] [--app PATH] [--output PATH] [--volume-name NAME] [--volume-icon PATH] [--no-build] [--dmg-sign-identity ID]
+  tools/build-dmg.sh [--profile debug|release] [--app PATH] [--output PATH] [--volume-name NAME] [--volume-icon PATH] [--no-build] [--app-sign-identity ID] [--dmg-sign-identity ID] [--dmg-identifier ID] [--notarize] [--notary-keychain-profile NAME]
 
 Builds a drag-and-drop macOS DMG containing CrossPuck.app and an Applications
 symlink in the conventional Finder layout. The default flow builds
@@ -18,11 +18,22 @@ Options:
   --volume-name NAME         Mounted DMG volume name. Defaults to "CrossPuck <version>".
   --volume-icon PATH         ICNS icon for the mounted DMG volume. Defaults to the app icon.
   --no-build                 Package target/<profile>/CrossPuck.app without rebuilding it.
+  --app-sign-identity ID     Optional codesign identity for signing the app bundle before packaging.
   --dmg-sign-identity ID     Optional codesign identity for signing the generated DMG.
+  --dmg-identifier ID        Codesign identifier for the generated DMG. Defaults to CROSSPUCK_DMG_IDENTIFIER
+                             or com.github.scryner.crosspuck.dmg.
+  --notarize                 Submit the signed DMG to Apple's notary service, staple it, validate it,
+                             run Gatekeeper assessment, and write <dmg>.sha256.
+  --notary-keychain-profile NAME
+                             notarytool keychain profile. Defaults to CROSSPUCK_NOTARY_KEYCHAIN_PROFILE.
+  --apple-id EMAIL           Apple ID for notarytool when no keychain profile is set. Defaults to APPLE_ID.
+  --apple-team-id ID         Apple Developer Team ID for notarytool. Defaults to APPLE_TEAM_ID.
+  --apple-password PASSWORD  App-specific password for notarytool. Defaults to APPLE_APP_SPECIFIC_PASSWORD.
   --help                     Show this help.
 
-This script does not notarize. In CI, notarize and staple either the signed app
-before packaging, or the generated signed DMG after this script finishes.
+For notarization, either set CROSSPUCK_NOTARY_KEYCHAIN_PROFILE after running
+`xcrun notarytool store-credentials`, or provide APPLE_ID, APPLE_TEAM_ID, and
+APPLE_APP_SPECIFIC_PASSWORD.
 USAGE
 }
 
@@ -35,7 +46,14 @@ output_path=""
 volume_name=""
 volume_icon_path=""
 no_build="0"
+app_sign_identity="${CROSSPUCK_APP_SIGN_IDENTITY:-}"
 dmg_sign_identity="${CROSSPUCK_DMG_SIGN_IDENTITY:-}"
+dmg_identifier="${CROSSPUCK_DMG_IDENTIFIER:-com.github.scryner.crosspuck.dmg}"
+notarize="0"
+notary_keychain_profile="${CROSSPUCK_NOTARY_KEYCHAIN_PROFILE:-}"
+notary_apple_id="${APPLE_ID:-}"
+notary_team_id="${APPLE_TEAM_ID:-}"
+notary_password="${APPLE_APP_SPECIFIC_PASSWORD:-}"
 
 workspace_version() {
   awk '
@@ -90,6 +108,72 @@ set_custom_icon_flag() {
   fi
 
   "$setfile" -a C "$target"
+}
+
+sign_app_bundle() {
+  local app="$1"
+  local identity="$2"
+
+  require_command codesign
+  codesign --force --timestamp --options runtime --sign "$identity" "$app"
+  codesign --verify --strict --verbose=4 "$app"
+}
+
+verify_app_bundle_for_notarization() {
+  local app="$1"
+
+  require_command codesign
+  if ! codesign --verify --strict --verbose=4 "$app"; then
+    cat >&2 <<EOF
+App bundle is not signed for notarization:
+  $app
+
+Pass --app-sign-identity ID or set CROSSPUCK_APP_SIGN_IDENTITY.
+EOF
+    exit 1
+  fi
+}
+
+sign_dmg() {
+  local dmg="$1"
+  local identity="$2"
+
+  require_command codesign
+  codesign --force --timestamp --sign "$identity" --identifier "$dmg_identifier" "$dmg"
+  codesign --verify --verbose=4 "$dmg"
+}
+
+notarize_dmg() {
+  local dmg="$1"
+  local auth_args=()
+
+  require_command xcrun
+  require_command spctl
+  require_command shasum
+
+  if [[ -n "$notary_keychain_profile" ]]; then
+    auth_args=(--keychain-profile "$notary_keychain_profile")
+  elif [[ -n "$notary_apple_id" && -n "$notary_team_id" && -n "$notary_password" ]]; then
+    auth_args=(
+      --apple-id "$notary_apple_id"
+      --team-id "$notary_team_id"
+      --password "$notary_password"
+    )
+  else
+    cat >&2 <<'EOF'
+Notarization credentials are missing.
+
+Set CROSSPUCK_NOTARY_KEYCHAIN_PROFILE, or set APPLE_ID, APPLE_TEAM_ID, and
+APPLE_APP_SPECIFIC_PASSWORD.
+EOF
+    exit 1
+  fi
+
+  xcrun notarytool submit "$dmg" "${auth_args[@]}" --wait
+  xcrun stapler staple "$dmg"
+  xcrun stapler validate "$dmg"
+  spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+  shasum -a 256 "$dmg" > "$dmg.sha256"
 }
 
 generate_background_image() {
@@ -211,8 +295,36 @@ while [[ $# -gt 0 ]]; do
       no_build="1"
       shift
       ;;
+    --app-sign-identity)
+      app_sign_identity="${2:?missing value for --app-sign-identity}"
+      shift 2
+      ;;
     --dmg-sign-identity)
       dmg_sign_identity="${2:?missing value for --dmg-sign-identity}"
+      shift 2
+      ;;
+    --dmg-identifier)
+      dmg_identifier="${2:?missing value for --dmg-identifier}"
+      shift 2
+      ;;
+    --notarize)
+      notarize="1"
+      shift
+      ;;
+    --notary-keychain-profile)
+      notary_keychain_profile="${2:?missing value for --notary-keychain-profile}"
+      shift 2
+      ;;
+    --apple-id)
+      notary_apple_id="${2:?missing value for --apple-id}"
+      shift 2
+      ;;
+    --apple-team-id)
+      notary_team_id="${2:?missing value for --apple-team-id}"
+      shift 2
+      ;;
+    --apple-password)
+      notary_password="${2:?missing value for --apple-password}"
       shift 2
       ;;
     --help|-h)
@@ -269,6 +381,12 @@ if [[ ! -d "$app_path" ]]; then
   exit 1
 fi
 
+if [[ -n "$app_sign_identity" ]]; then
+  sign_app_bundle "$app_path" "$app_sign_identity"
+elif [[ "$notarize" == "1" ]]; then
+  verify_app_bundle_for_notarization "$app_path"
+fi
+
 if [[ -z "$volume_icon_path" ]]; then
   default_app_icon="$app_path/Contents/Resources/CrossPuck.icns"
   if [[ -f "$default_app_icon" ]]; then
@@ -288,6 +406,15 @@ if [[ -z "$output_path" ]]; then
 fi
 output_path="$(absolute_path "$output_path")"
 mkdir -p "$(dirname "$output_path")"
+
+if [[ "$notarize" == "1" && -z "$dmg_sign_identity" ]]; then
+  cat >&2 <<'EOF'
+DMG signing identity is required when --notarize is set.
+
+Pass --dmg-sign-identity ID or set CROSSPUCK_DMG_SIGN_IDENTITY.
+EOF
+  exit 1
+fi
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/crosspuck-dmg.XXXXXX")"
 cleanup() {
@@ -352,8 +479,11 @@ hdiutil convert "$rw_image" \
   "$output_path"
 
 if [[ -n "$dmg_sign_identity" ]]; then
-  require_command codesign
-  codesign --force --sign "$dmg_sign_identity" "$output_path"
+  sign_dmg "$output_path" "$dmg_sign_identity"
+fi
+
+if [[ "$notarize" == "1" ]]; then
+  notarize_dmg "$output_path"
 fi
 
 cat <<EOF
@@ -372,5 +502,16 @@ if [[ -n "$volume_icon_path" ]]; then
 
 Volume icon:
   $volume_icon_path
+EOF
+fi
+
+if [[ "$notarize" == "1" ]]; then
+  cat <<EOF
+
+Notarized DMG:
+  $output_path
+
+SHA256:
+  $output_path.sha256
 EOF
 fi

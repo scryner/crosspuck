@@ -4,7 +4,7 @@ use oslog::OsLogger;
 use std::env;
 use std::ffi::OsString;
 
-const LOG_SUBSYSTEM: &str = "dev.crosspuck.host";
+const LOG_SUBSYSTEM: &str = "com.github.scryner.crosspuck";
 const LOG_LEVEL_ENV: &str = "CROSSPUCK_LOG_LEVEL";
 const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
 

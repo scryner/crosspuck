@@ -30,6 +30,34 @@ EOF
   fi
 }
 
+workspace_version() {
+  awk '
+    /^\[workspace.package\]/ { in_workspace_package = 1; next }
+    /^\[/ { in_workspace_package = 0 }
+    in_workspace_package && /^[[:space:]]*version[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", value)
+      sub(/".*$/, "", value)
+      print value
+      exit
+    }
+  ' "$root_dir/Cargo.toml"
+}
+
+set_bundle_version() {
+  plist="$1"
+  version="$2"
+
+  if [ ! -x /usr/libexec/PlistBuddy ]; then
+    echo "PlistBuddy is required to update the app bundle version." >&2
+    exit 1
+  fi
+
+  /usr/libexec/PlistBuddy \
+    -c "Set :CFBundleShortVersionString $version" \
+    "$plist"
+}
+
 sha256_file() {
   shasum -a 256 "$1" | awk '{print $1}'
 }
@@ -50,6 +78,12 @@ case "$profile" in
     exit 2
     ;;
 esac
+
+app_version="$(workspace_version)"
+if [ -z "$app_version" ]; then
+  echo "Could not read workspace package version from Cargo.toml" >&2
+  exit 1
+fi
 
 ensure_driver_target_installed
 
@@ -83,6 +117,7 @@ rm -rf "$app_dir"
 mkdir -p "$macos_dir" "$resources_dir" "$guest_driver_dir"
 cp "$root_dir/target/$profile/CrossPuck" "$macos_dir/CrossPuck"
 cp "$root_dir/crates/crosspuck-app/Info.plist" "$contents_dir/Info.plist"
+set_bundle_version "$contents_dir/Info.plist" "$app_version"
 cp -R "$root_dir/crates/crosspuck-app/Resources/." "$resources_dir/"
 cp "$root_dir/LICENSE" "$resources_dir/LICENSE"
 cp "$root_dir/THIRD-PARTY-NOTICES.md" "$resources_dir/THIRD-PARTY-NOTICES.md"
