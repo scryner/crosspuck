@@ -3,8 +3,8 @@ use crosspuck_core::hid::{
     HidFilter, HidSnapshotError, PuckSnapshot,
 };
 use crosspuck_core::protocol::{
-    session_trace_label, CollectionRole, FeatureResult, GetFeature, IdentityPayload, SetFeature,
-    SetFeatureResult, SetOutput, SetOutputResult, StatusCode, WriteReport, WriteResult,
+    session_trace_label, CollectionRole, FeatureResult, GetFeature, SetFeature, SetFeatureResult,
+    SetOutput, SetOutputResult, StatusCode, WriteReport, WriteResult,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -51,7 +51,6 @@ fn log_host_guest_warning(args: std::fmt::Arguments<'_>) {
 }
 
 pub(crate) trait HostBackend: Send + Sync {
-    fn identity(&self) -> &IdentityPayload;
     fn open_input_reader(&self) -> Result<Box<dyn InputReportReader>, HostHidError>;
     fn get_feature(&self, request: &GetFeature) -> FeatureResult;
     fn set_feature(&self, request: &SetFeature) -> SetFeatureResult;
@@ -79,7 +78,6 @@ pub(crate) struct HostInputReport {
 #[derive(Clone, Debug)]
 pub(crate) struct RealHostBackend {
     snapshot: Arc<Mutex<PuckSnapshot>>,
-    identity: IdentityPayload,
     main: SharedMainDevice,
     interface_devices: Arc<Mutex<BTreeMap<u8, CachedInterfaceDevice>>>,
 }
@@ -98,11 +96,10 @@ struct CachedInterfaceDevice {
 }
 
 impl RealHostBackend {
-    pub fn new(snapshot: PuckSnapshot, identity: IdentityPayload) -> Result<Self, HostHidError> {
+    pub fn new(snapshot: PuckSnapshot) -> Result<Self, HostHidError> {
         let main = Self::open_main_device(&snapshot)?;
         Ok(Self {
             snapshot: Arc::new(Mutex::new(snapshot)),
-            identity,
             main,
             interface_devices: Arc::new(Mutex::new(BTreeMap::new())),
         })
@@ -427,10 +424,6 @@ impl RealHostBackend {
 }
 
 impl HostBackend for RealHostBackend {
-    fn identity(&self) -> &IdentityPayload {
-        &self.identity
-    }
-
     fn open_input_reader(&self) -> Result<Box<dyn InputReportReader>, HostHidError> {
         let readers = self.open_input_devices();
         if readers.is_empty() {
@@ -1006,9 +999,17 @@ impl fmt::Display for HostHidError {
                 write!(f, "invalid HID interface number: {interface_number}")
             }
             Self::DeviceLockPoisoned => write!(f, "HID device lock poisoned"),
+            Self::Hid(error) if is_macos_hid_permission_error(error) => write!(
+                f,
+                "{error}; macOS denied HID access. Run CrossPuck as an app bundle and enable Privacy & Security > Input Monitoring for CrossPuck."
+            ),
             Self::Hid(error) => write!(f, "{error}"),
         }
     }
+}
+
+fn is_macos_hid_permission_error(error: &HidSnapshotError) -> bool {
+    matches!(error, HidSnapshotError::Hid(_)) && error.to_string().contains("0xE00002E2")
 }
 
 impl std::error::Error for HostHidError {

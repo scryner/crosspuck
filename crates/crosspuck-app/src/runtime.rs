@@ -350,23 +350,33 @@ fn handle_session(
             }
         };
     let identity = IdentityPayload::try_from(&snapshot)?;
-    let backend = Arc::new(with_worker_autorelease_pool(|| {
-        RealHostBackend::new(snapshot, identity)
-    })?);
-    handle_session_with_backend(
-        listeners,
-        control,
-        SessionStart {
-            session_id,
-            session_trace_id,
-            guest_runtime_overrides,
-            hello_request_id: hello_frame.header.id,
-            guest_pid: hello.guest_pid,
-        },
-        app_state,
-        backend,
-        stop,
-    )
+    let session = SessionStart {
+        session_id,
+        session_trace_id,
+        guest_runtime_overrides,
+        hello_request_id: hello_frame.header.id,
+        guest_pid: hello.guest_pid,
+    };
+    app_state.set(HostRuntimeState::PuckConnected {
+        serial: identity.serial.clone(),
+    });
+    let backend = match with_worker_autorelease_pool(|| RealHostBackend::new(snapshot)) {
+        Ok(backend) => Arc::new(backend),
+        Err(error) => {
+            let hello_ok = hello_ok_with_status(
+                StatusCode::DeviceDisconnected,
+                session_id,
+                session_trace_id,
+                identity.default_input_report_len(),
+            );
+            write_payload(control, hello_frame.header.id, &hello_ok)?;
+            return Err(error.into());
+        }
+    };
+    write_session_preamble(control, &session, &identity)?;
+    let input =
+        attach_input_for_session(listeners, stop, INPUT_ATTACH_TIMEOUT, &session, &identity)?;
+    run_attached_session(control, input, session, app_state, backend, stop, identity)
 }
 
 #[derive(Clone, Debug)]
@@ -378,11 +388,13 @@ struct SessionStart {
     guest_pid: u32,
 }
 
+#[cfg(test)]
 fn handle_session_with_backend(
     listeners: &TransportListeners,
     control: &mut ChannelStream,
     session: SessionStart,
     app_state: &AppState,
+    identity: IdentityPayload,
     backend: Arc<dyn HostBackend>,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), RuntimeError> {
@@ -391,26 +403,39 @@ fn handle_session_with_backend(
         control,
         session,
         app_state,
+        identity,
         backend,
         stop,
         INPUT_ATTACH_TIMEOUT,
     )
 }
 
+#[cfg(test)]
 fn handle_session_with_backend_timeout(
     listeners: &TransportListeners,
     control: &mut ChannelStream,
     session: SessionStart,
     app_state: &AppState,
+    identity: IdentityPayload,
     backend: Arc<dyn HostBackend>,
     stop: &Arc<AtomicBool>,
     input_attach_timeout: Duration,
 ) -> Result<(), RuntimeError> {
-    let identity = backend.identity().clone();
     app_state.set(HostRuntimeState::PuckConnected {
         serial: identity.serial.clone(),
     });
 
+    write_session_preamble(control, &session, &identity)?;
+    let input =
+        attach_input_for_session(listeners, stop, input_attach_timeout, &session, &identity)?;
+    run_attached_session(control, input, session, app_state, backend, stop, identity)
+}
+
+fn write_session_preamble(
+    control: &mut ChannelStream,
+    session: &SessionStart,
+    identity: &IdentityPayload,
+) -> Result<(), RuntimeError> {
     write_payload(
         control,
         session.hello_request_id,
@@ -428,8 +453,17 @@ fn handle_session_with_backend_timeout(
             log_level.as_str()
         );
     }
-    write_payload(control, 0, &identity)?;
+    write_payload(control, 0, identity)?;
+    Ok(())
+}
 
+fn attach_input_for_session(
+    listeners: &TransportListeners,
+    stop: &Arc<AtomicBool>,
+    input_attach_timeout: Duration,
+    session: &SessionStart,
+    identity: &IdentityPayload,
+) -> Result<ChannelStream, RuntimeError> {
     let mut input = accept_input_for_session(listeners, stop, input_attach_timeout)?;
     input.set_write_timeout(Some(Duration::from_millis(250)))?;
     input.set_read_timeout(Some(Duration::from_millis(250)))?;
@@ -461,7 +495,18 @@ fn handle_session_with_backend_timeout(
             actual: attach.session_id,
         });
     }
+    Ok(input)
+}
 
+fn run_attached_session(
+    control: &mut ChannelStream,
+    input: ChannelStream,
+    session: SessionStart,
+    app_state: &AppState,
+    backend: Arc<dyn HostBackend>,
+    stop: &Arc<AtomicBool>,
+    identity: IdentityPayload,
+) -> Result<(), RuntimeError> {
     app_state.set(HostRuntimeState::GuestConnected {
         session_id: session.session_id,
         session_trace_id: session.session_trace_id,
@@ -812,7 +857,6 @@ mod tests {
 
     #[derive(Clone)]
     struct FakeBackend {
-        identity: IdentityPayload,
         reports: Arc<Mutex<VecDeque<Vec<u8>>>>,
         operations: Arc<Mutex<Vec<String>>>,
         cleanup_called: Arc<AtomicBool>,
@@ -821,7 +865,6 @@ mod tests {
     impl FakeBackend {
         fn new(reports: Vec<Vec<u8>>) -> Self {
             Self {
-                identity: test_identity(),
                 reports: Arc::new(Mutex::new(reports.into())),
                 operations: Arc::new(Mutex::new(Vec::new())),
                 cleanup_called: Arc::new(AtomicBool::new(false)),
@@ -842,10 +885,6 @@ mod tests {
     }
 
     impl HostBackend for FakeBackend {
-        fn identity(&self) -> &IdentityPayload {
-            &self.identity
-        }
-
         fn open_input_reader(&self) -> Result<Box<dyn InputReportReader>, HostHidError> {
             Ok(Box::new(FakeInputReader {
                 reports: Arc::clone(&self.reports),
@@ -949,6 +988,7 @@ mod tests {
                     guest_pid: 1234,
                 },
                 &AppState::new(),
+                test_identity(),
                 Arc::new(backend_for_server),
                 &server_stop,
             )
@@ -1034,6 +1074,7 @@ mod tests {
                         guest_pid: 1234,
                     },
                     &AppState::new(),
+                    test_identity(),
                     Arc::new(backend),
                     &server_stop,
                 )
@@ -1081,6 +1122,7 @@ mod tests {
                     guest_pid: 1234,
                 },
                 &AppState::new(),
+                test_identity(),
                 Arc::new(backend),
                 &server_stop,
             );
@@ -1142,6 +1184,7 @@ mod tests {
                     guest_pid: 1234,
                 },
                 &AppState::new(),
+                test_identity(),
                 Arc::new(backend),
                 &server_stop,
                 Duration::from_millis(100),

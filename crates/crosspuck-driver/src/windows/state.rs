@@ -4,14 +4,12 @@ use crosspuck_core::guest_driver::{
     VirtualHidProfileCatalog,
 };
 use std::sync::{Mutex, OnceLock};
-use std::thread;
-use std::time::Duration;
 
 static RUNTIME: OnceLock<GuestDriverRuntime> = OnceLock::new();
 static BRIDGE_CONNECT_ALLOWED: OnceLock<bool> = OnceLock::new();
 static LAST_CATALOG_LOG_STATE: OnceLock<Mutex<Option<CatalogLogState>>> = OnceLock::new();
+static LAST_BRIDGE_CONNECT_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static LAST_HOST_LOG_LEVEL_OVERRIDE: OnceLock<Mutex<Option<GuestLogLevel>>> = OnceLock::new();
-static BRIDGE_CONNECTOR_STARTED: OnceLock<()> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CatalogLogState {
@@ -53,15 +51,11 @@ pub fn catalog(reason: &'static str) -> Option<VirtualHidProfileCatalog> {
         return catalog;
     }
 
-    start_bridge_connector(reason);
     let before = runtime.snapshot();
     let catalog = match runtime.catalog_result() {
         Ok(catalog) => catalog,
         Err(error) => {
-            set_session_trace_id(runtime.session_trace_id());
-            error_line(&format!(
-                "[crosspuck] lazy bridge connect failed reason={reason}: {error}"
-            ));
+            log_bridge_connect_failed(runtime, reason, &error.to_string());
             return None;
         }
     };
@@ -69,56 +63,6 @@ pub fn catalog(reason: &'static str) -> Option<VirtualHidProfileCatalog> {
     let after = runtime.snapshot();
     log_catalog_state(reason, &before, &after, catalog.is_some());
     catalog
-}
-
-pub fn start_bridge_connector(reason: &'static str) {
-    if !bridge_connect_allowed() {
-        return;
-    }
-
-    if BRIDGE_CONNECTOR_STARTED.set(()).is_err() {
-        return;
-    }
-
-    thread::spawn(move || {
-        for attempt in 1..=8 {
-            let Some(runtime) = runtime() else {
-                return;
-            };
-            let snapshot = runtime.snapshot();
-            if snapshot.bridge_connected {
-                apply_connection_logging(runtime);
-                info_line(&format!(
-                    "[crosspuck] background bridge connector already connected reason={reason} identity={:?} profiles={}",
-                    snapshot.identity_state, snapshot.advertised_profiles
-                ));
-                return;
-            }
-
-            debug_line(&format!(
-                "[crosspuck] background bridge connect attempt={attempt}/8 reason={reason}"
-            ));
-            match runtime.connect_bridge() {
-                Ok(()) => {
-                    apply_connection_logging(runtime);
-                    let snapshot = runtime.snapshot();
-                    info_line(&format!(
-                        "[crosspuck] background bridge connect ok reason={reason} identity={:?} profiles={} open_handles={}",
-                        snapshot.identity_state, snapshot.advertised_profiles, snapshot.open_handles
-                    ));
-                    return;
-                }
-                Err(error) => {
-                    set_session_trace_id(runtime.session_trace_id());
-                    error_line(&format!(
-                        "[crosspuck] background bridge connect failed attempt={attempt}/8 reason={reason}: {error}"
-                    ));
-                }
-            }
-
-            thread::sleep(Duration::from_millis(500));
-        }
-    });
 }
 
 pub fn catalog_if_connected(reason: &'static str) -> Option<VirtualHidProfileCatalog> {
@@ -135,6 +79,36 @@ pub fn catalog_if_connected(reason: &'static str) -> Option<VirtualHidProfileCat
         ));
     }
     catalog
+}
+
+fn log_bridge_connect_failed(
+    runtime: &GuestDriverRuntime,
+    reason: &'static str,
+    error_message: &str,
+) {
+    let Ok(mut last) = LAST_BRIDGE_CONNECT_ERROR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    else {
+        return;
+    };
+    if last.as_deref() == Some(error_message) {
+        return;
+    }
+    *last = Some(error_message.to_string());
+    set_session_trace_id(runtime.session_trace_id());
+    error_line(&format!(
+        "[crosspuck] lazy bridge connect failed reason={reason}: {error_message}"
+    ));
+}
+
+fn clear_bridge_connect_error() {
+    if let Ok(mut last) = LAST_BRIDGE_CONNECT_ERROR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *last = None;
+    }
 }
 
 fn apply_connection_logging(runtime: &GuestDriverRuntime) {
@@ -198,6 +172,7 @@ fn log_catalog_state(
     }
 
     if after.bridge_connected {
+        clear_bridge_connect_error();
         set_session_trace_id(after.session_trace_id);
         info_line(&format!(
             "[crosspuck] lazy bridge connect ok reason={reason} identity={:?} profiles={} open_handles={}",

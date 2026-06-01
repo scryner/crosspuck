@@ -185,11 +185,16 @@ install/update/uninstall automatically, and install/update/repair import the
 Wine loader override registry file as described above. The shell installer
 below is mainly for manual development and smoke testing.
 
-Install the driver next to `Steam.exe` in the target bottle and import the Wine
-loader override:
+Copy the driver next to `Steam.exe` in the target bottle:
 
 ```sh
 tools/install-driver.sh --bottle Steam
+```
+
+To also import Wine's `hid=native,builtin` loader override:
+
+```sh
+tools/install-driver.sh --bottle Steam --override-dll
 ```
 
 Useful options:
@@ -202,11 +207,11 @@ tools/install-driver.sh \
 ```
 
 The script copies `hid.dll`, backs up any existing local `hid.dll`, and
-initializes `crosspuck-driver.log`. It also writes
-`crosspuck-wine-override.reg` into the bottle and imports it with the matching
-CrossOver app, using CrossOver Preview first for preview-marked bottles and
-CrossOver first for regular bottles. It does not set guest runtime options or
-rewrite `user.reg` directly.
+initializes `crosspuck-driver.log`. By default it does not call CrossOver
+`regedit`. With `--override-dll`, it writes `crosspuck-wine-override.reg` into
+the bottle and imports it with the matching CrossOver app, using CrossOver
+Preview first for preview-marked bottles and CrossOver first for regular
+bottles. It does not set guest runtime options or rewrite `user.reg` directly.
 
 Do not install this DLL into `drive_c/windows/system32`. It is designed to live
 next to Steam and forward non-virtual HID calls to the real system HID DLL.
