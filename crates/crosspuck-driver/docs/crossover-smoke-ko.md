@@ -46,7 +46,7 @@ Steam이 실행 중이면 완전히 종료합니다.
 기본 Steam bottle을 사용하면:
 
 ```sh
-tools/install-driver.sh --bottle Steam
+tools/install-driver.sh --bottle Steam --override-dll
 ```
 
 DLL 경로를 직접 지정하려면:
@@ -55,6 +55,7 @@ DLL 경로를 직접 지정하려면:
 tools/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
+  --override-dll \
   --no-build
 ```
 
@@ -64,8 +65,8 @@ tools/install-driver.sh \
 - `steam.exe`와 같은 디렉터리에 `hid.dll`을 복사합니다.
 - 기존 `hid.dll`이 있으면 `crosspuck-backups/` 아래에 백업합니다.
 - Steam 디렉터리에 `crosspuck-driver.log`를 초기화합니다.
-- bottle에 `crosspuck-wine-override.reg`를 생성하고 CrossOver `regedit`로
-  import합니다.
+- `--override-dll`을 지정한 경우에만 bottle에 `crosspuck-wine-override.reg`를
+  생성하고 CrossOver `regedit`로 import합니다.
 - guest runtime용 `CROSSPUCK_*` registry/environment 값은 쓰지 않습니다.
   runtime 설정은 기본값을 쓰고, override가 필요한 값은 macOS host app이
   bridge connection으로 전달합니다.
@@ -80,8 +81,8 @@ drive_c/windows/system32/hid.dll
 
 ## 3. Wine loader override
 
-설치 스크립트는 loader-only Wine override 파일을 자동으로 생성하고
-import합니다.
+설치 스크립트는 `--override-dll`을 지정했을 때만 loader-only Wine override
+파일을 생성하고 import합니다.
 
 생성 후 bottle에 남는 registry 파일:
 
@@ -138,7 +139,6 @@ CrossOver에서 Steam bottle의 Steam을 실행합니다.
 
 ```text
 [crosspuck] crosspuck-driver attached ... host_bridge=true required=true ...
-[crosspuck] startup bridge connect skipped: lazy connect enabled
 ```
 
 `hook install ok`와 API discovery 세부 로그는 debug level 로그이므로 host app이 debug 또는 trace guest severity override를 내렸을 때만 나옵니다.
@@ -205,8 +205,8 @@ tools/smoke-check.sh --bottle Steam
 
 - `OK installed driver`: `steam.exe` 옆에 `hid.dll`이 있습니다.
 - `OK driver log`: 로그 파일이 있습니다.
-- `WARN legacy env registry`: 이전 smoke에서 남은 env registry 파일이 있으며 새 경로에서는 사용하지 않습니다.
-- `WARN log marker missing`: 해당 API 경로를 아직 밟지 않았거나, Steam이 DLL을 로드하지 않았거나, host app이 실행 중이 아니었을 수 있습니다.
+- `WARN log marker missing`: 필수 smoke marker가 없으므로 Steam이 DLL을 로드했는지, host app이 실행 중인지, 해당 API 경로를 밟았는지 확인합니다.
+- `INFO optional log marker missing`: debug/trace logging을 켜지 않았거나 해당 UI 경로를 밟지 않았다면 정상입니다.
 
 ## 9. 통과 기준
 

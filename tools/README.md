@@ -15,11 +15,16 @@ only the app-local `hid.dll` and intentionally leaves Wine registry settings
 unchanged. These shell commands are for manual development and smoke-test
 workflows.
 
-Install the production guest driver next to `Steam.exe` and import the Wine
-loader override:
+Copy the production guest driver next to `Steam.exe`:
 
 ```sh
 tools/install-driver.sh --bottle Steam
+```
+
+To also import Wine's `hid=native,builtin` loader override:
+
+```sh
+tools/install-driver.sh --bottle Steam --override-dll
 ```
 
 Useful options:
@@ -32,7 +37,8 @@ tools/install-driver.sh \
 ```
 
 The script copies `hid.dll`, backs up any existing app-local `hid.dll`, and
-initializes `crosspuck-driver.log` next to Steam. It also writes
+initializes `crosspuck-driver.log` next to Steam. By default it does not call
+CrossOver `regedit`. With `--override-dll`, it writes
 `crosspuck-wine-override.reg` into the bottle and imports it with the matching
 CrossOver app, using CrossOver Preview first for preview-marked bottles and
 CrossOver first for regular bottles. It does not write guest runtime
@@ -106,9 +112,9 @@ After exercising the Steam UI, run:
 tools/smoke-check.sh --bottle Steam
 ```
 
-Warnings from this script are hints, not hard failures. Missing trace markers
-usually mean the corresponding Steam UI path was not exercised, the host app was
-not running, or debug/trace logging was not enabled.
+Warnings from this script indicate missing required smoke markers. Optional INFO
+markers are expected to be absent unless the corresponding Steam UI path was
+exercised or debug/trace logging was enabled.
 
 ## Development Checks
 

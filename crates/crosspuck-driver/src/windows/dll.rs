@@ -64,22 +64,16 @@ fn attach() {
     }
 
     info_line(&format!(
-        "[crosspuck] crosspuck-driver attached pid={} process={} host_bridge={} required={} trace={} bridge_connect_allowed={} connect_timeout_ms={} handshake_timeout_ms={} io_timeout_ms={} reconnect_interval_ms={}",
+        "[crosspuck] crosspuck-driver attached pid={} process={} host_bridge={} required={} trace={} bridge_connect_allowed={}",
         std::process::id(),
         process,
         host_bridge_enabled,
         host_bridge_required,
         trace_reports,
-        bridge_connect_allowed,
-        connect_timeout_ms,
-        handshake_timeout_ms,
-        io_timeout_ms,
-        reconnect_interval_ms
+        bridge_connect_allowed
     ));
-    if host_bridge_enabled {
-        info_line("[crosspuck] startup bridge connect skipped: lazy connect enabled");
-        if bridge_connect_allowed {
-            state::start_bridge_connector("steam startup");
-        }
-    }
+    debug_line(&format!(
+        "[crosspuck] driver timeouts connect_ms={} handshake_ms={} io_ms={} reconnect_ms={}",
+        connect_timeout_ms, handshake_timeout_ms, io_timeout_ms, reconnect_interval_ms
+    ));
 }

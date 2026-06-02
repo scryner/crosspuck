@@ -4,14 +4,15 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  tools/install-driver.sh [--bottle NAME | --bottle-path PATH] [--driver PATH] [--steam-dir PATH] [--no-build]
+  tools/install-driver.sh [--bottle NAME | --bottle-path PATH] [--driver PATH] [--steam-dir PATH] [--override-dll] [--no-build]
 
 Installs the production crosspuck-driver hid.dll next to Steam.exe inside a
 CrossOver bottle.
 
 The script verifies that the Rust Windows GNU target is installed, builds the
 driver with Cargo unless --no-build is provided, and then installs the resulting
-DLL. It also writes crosspuck-wine-override.reg in the bottle and imports it
+DLL. By default it only copies the driver and prepares the driver log. Pass
+--override-dll to write crosspuck-wine-override.reg in the bottle and import it
 with the matching CrossOver regedit, setting hid=native,builtin. It does not
 write guest runtime CROSSPUCK_* registry/environment settings. Guest runtime
 settings use built-in defaults unless the macOS host app sends overrides over
@@ -23,6 +24,7 @@ Options:
   --driver PATH          hid.dll path to copy. Defaults to the Cargo release output.
   --steam-dir PATH       Steam directory inside the bottle. Auto-detected from Steam.exe.
   --log-file PATH        Unix path for the driver log file. Defaults to the Steam directory.
+  --override-dll         Import Wine's hid=native,builtin DLL override.
   --no-build             Do not build the driver before copying --driver.
   --help                 Show this help.
 
@@ -41,6 +43,7 @@ driver_path="$repo_root/target/$driver_target/release/hid.dll"
 steam_dir=""
 log_file=""
 no_build="0"
+override_dll="0"
 
 ensure_driver_target_installed() {
   if ! command -v rustup >/dev/null 2>&1; then
@@ -121,6 +124,10 @@ while [[ $# -gt 0 ]]; do
     --log-file)
       log_file="${2:?missing value for --log-file}"
       shift 2
+      ;;
+    --override-dll)
+      override_dll="1"
+      shift
       ;;
     --no-build)
       no_build="1"
@@ -209,18 +216,20 @@ find "$steam_dir" -name crosspuck-driver.log -type f ! -path "$log_file" -delete
 find "$bottle_path/drive_c/users" -name crosspuck-driver.log -type f -delete 2>/dev/null || true
 : > "$log_file"
 
-wine_override_file="$bottle_path/crosspuck-wine-override.reg"
-cat > "$wine_override_file" <<EOF
+if [[ "$override_dll" == "1" ]]; then
+  wine_override_file="$bottle_path/crosspuck-wine-override.reg"
+  cat > "$wine_override_file" <<EOF
 Windows Registry Editor Version 5.00
 
 [HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]
 "hid"="native,builtin"
 EOF
-crossover_wine="$(find_crossover_wine)" || {
-  echo "Could not find CrossOver wine command to import $wine_override_file" >&2
-  exit 1
-}
-"$crossover_wine" --bottle "$bottle_name" --no-gui regedit /S "$wine_override_file"
+  crossover_wine="$(find_crossover_wine)" || {
+    echo "Could not find CrossOver wine command to import $wine_override_file" >&2
+    exit 1
+  }
+  "$crossover_wine" --bottle "$bottle_name" --no-gui --no-update regedit /S "$wine_override_file"
+fi
 
 cat <<EOF
 Installed CrossPuck driver:
@@ -232,11 +241,19 @@ EOF
 
 cat <<EOF
 
-Wine loader override registry file:
-  $wine_override_file
-Imported with:
-  $crossover_wine
+Wine loader override:
 EOF
+if [[ "$override_dll" == "1" ]]; then
+  cat <<EOF
+  imported hid=native,builtin
+  file: $wine_override_file
+  command: $crossover_wine
+EOF
+else
+  cat <<EOF
+  not imported; pass --override-dll to set hid=native,builtin
+EOF
+fi
 
 cat <<EOF
 

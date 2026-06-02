@@ -157,8 +157,6 @@ static ORIGINAL_SETUPDI_GET_DEVICE_INSTANCE_ID_A: OnceLock<SetupDiGetDeviceInsta
     OnceLock::new();
 static ORIGINAL_SETUPDI_GET_DEVICE_PROPERTY_W: OnceLock<SetupDiGetDevicePropertyWFn> =
     OnceLock::new();
-static SYNTHETIC_ENUM_BASES: OnceLock<Mutex<Vec<(usize, u32)>>> = OnceLock::new();
-static SYNTHETIC_ELIGIBLE_DEVICE_INFO_SETS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 static VIRTUAL_DEVINSTS: OnceLock<Mutex<Vec<(u32, VirtualHidProfile)>>> = OnceLock::new();
 
 pub fn set_original_setupdi_get_class_devs_w(ptr: *mut c_void) -> Result<(), String> {
@@ -241,7 +239,6 @@ pub unsafe extern "system" fn detoured_setupdi_get_class_devs_w(
     if original.is_some_and(|handle| handle != INVALID_HANDLE_VALUE) {
         let handle = original.unwrap();
         if synthetic_allowed {
-            remember_synthetic_eligible_device_info_set(handle);
             debug_line(&format!(
                 "[crosspuck] SetupDiGetClassDevsW native hid handle={handle:p} flags=0x{flags:08X}"
             ));
@@ -272,7 +269,6 @@ pub unsafe extern "system" fn detoured_setupdi_get_class_devs_a(
     if original.is_some_and(|handle| handle != INVALID_HANDLE_VALUE) {
         let handle = original.unwrap();
         if synthetic_allowed {
-            remember_synthetic_eligible_device_info_set(handle);
             debug_line(&format!(
                 "[crosspuck] SetupDiGetClassDevsA native hid handle={handle:p} flags=0x{flags:08X}"
             ));
@@ -296,21 +292,23 @@ pub unsafe extern "system" fn detoured_setupdi_enum_device_interfaces(
     member_index: u32,
     device_interface_data: *mut c_void,
 ) -> BOOL {
-    if let Some(original) = ORIGINAL_SETUPDI_ENUM_DEVICE_INTERFACES.get().copied() {
-        let result = original(
-            device_info_set,
-            device_info_data,
-            interface_class_guid,
-            member_index,
-            device_interface_data,
-        );
-        if result != 0 {
-            if is_hid_interface_guid(interface_class_guid) {
-                debug_line(&format!(
-                    "[crosspuck] SetupDiEnumDeviceInterfaces native index={member_index} set={device_info_set:p}"
-                ));
+    if device_info_set != SYNTHETIC_DEVICE_INFO_SET {
+        if let Some(original) = ORIGINAL_SETUPDI_ENUM_DEVICE_INTERFACES.get().copied() {
+            let result = original(
+                device_info_set,
+                device_info_data,
+                interface_class_guid,
+                member_index,
+                device_interface_data,
+            );
+            if result != 0 {
+                if is_hid_interface_guid(interface_class_guid) {
+                    debug_line(&format!(
+                        "[crosspuck] SetupDiEnumDeviceInterfaces native index={member_index} set={device_info_set:p}"
+                    ));
+                }
+                return result;
             }
-            return result;
         }
     }
 
@@ -353,6 +351,13 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_interface_detail_w(
             device_info_data,
         );
     }
+    if device_info_set == SYNTHETIC_DEVICE_INFO_SET
+        || device_interface_data_has_crosspuck_reserved(device_interface_data)
+    {
+        debug_line("[crosspuck] SetupDiGetDeviceInterfaceDetailW refusing native call for synthetic interface data");
+        SetLastError(ERROR_NO_MORE_ITEMS);
+        return 0;
+    }
     let result = ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_W
         .get()
         .copied()
@@ -393,6 +398,13 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_interface_detail_a(
             device_info_data,
         );
     }
+    if device_info_set == SYNTHETIC_DEVICE_INFO_SET
+        || device_interface_data_has_crosspuck_reserved(device_interface_data)
+    {
+        debug_line("[crosspuck] SetupDiGetDeviceInterfaceDetailA refusing native call for synthetic interface data");
+        SetLastError(ERROR_NO_MORE_ITEMS);
+        return 0;
+    }
     let result = ORIGINAL_SETUPDI_GET_DEVICE_INTERFACE_DETAIL_A
         .get()
         .copied()
@@ -421,11 +433,13 @@ pub unsafe extern "system" fn detoured_setupdi_enum_device_info(
     member_index: u32,
     device_info_data: *mut c_void,
 ) -> BOOL {
-    if let Some(original) = ORIGINAL_SETUPDI_ENUM_DEVICE_INFO.get().copied() {
-        let result = original(device_info_set, member_index, device_info_data);
-        if result != 0 {
-            remember_virtual_device_info(device_info_data, "OriginalEnumDeviceInfo");
-            return result;
+    if device_info_set != SYNTHETIC_DEVICE_INFO_SET {
+        if let Some(original) = ORIGINAL_SETUPDI_ENUM_DEVICE_INFO.get().copied() {
+            let result = original(device_info_set, member_index, device_info_data);
+            if result != 0 {
+                remember_virtual_device_info(device_info_data, "OriginalEnumDeviceInfo");
+                return result;
+            }
         }
     }
 
@@ -467,6 +481,10 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_registry_property_w(
             );
         }
     }
+    if device_info_set == SYNTHETIC_DEVICE_INFO_SET {
+        SetLastError(ERROR_NO_MORE_ITEMS);
+        return 0;
+    }
     ORIGINAL_SETUPDI_GET_DEVICE_REGISTRY_PROPERTY_W
         .get()
         .copied()
@@ -507,6 +525,10 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_registry_property_a(
             );
         }
     }
+    if device_info_set == SYNTHETIC_DEVICE_INFO_SET {
+        SetLastError(ERROR_NO_MORE_ITEMS);
+        return 0;
+    }
     ORIGINAL_SETUPDI_GET_DEVICE_REGISTRY_PROPERTY_A
         .get()
         .copied()
@@ -546,6 +568,10 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_instance_id_w(
             );
         }
     }
+    if device_info_set == SYNTHETIC_DEVICE_INFO_SET {
+        SetLastError(ERROR_NO_MORE_ITEMS);
+        return 0;
+    }
     ORIGINAL_SETUPDI_GET_DEVICE_INSTANCE_ID_W
         .get()
         .copied()
@@ -582,6 +608,10 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_instance_id_a(
                 required_size,
             );
         }
+    }
+    if device_info_set == SYNTHETIC_DEVICE_INFO_SET {
+        SetLastError(ERROR_NO_MORE_ITEMS);
+        return 0;
     }
     ORIGINAL_SETUPDI_GET_DEVICE_INSTANCE_ID_A
         .get()
@@ -623,6 +653,10 @@ pub unsafe extern "system" fn detoured_setupdi_get_device_property_w(
             );
         }
     }
+    if device_info_set == SYNTHETIC_DEVICE_INFO_SET {
+        SetLastError(ERROR_NO_MORE_ITEMS);
+        return 0;
+    }
     ORIGINAL_SETUPDI_GET_DEVICE_PROPERTY_W
         .get()
         .copied()
@@ -652,8 +686,7 @@ fn synthetic_profile_for_member(
         return None;
     }
     let catalog = runtime_catalog()?;
-    let base = synthetic_enum_base_index(device_info_set, member_index);
-    let offset = member_index.checked_sub(base)? as usize;
+    let offset = member_index as usize;
     let profile = catalog.descriptors().get(offset)?.profile;
     Some((profile, catalog))
 }
@@ -682,56 +715,6 @@ unsafe fn narrow_z_is_null_or_empty(value: PCSTR) -> bool {
 
 fn synthetic_device_info_set_can_enumerate(device_info_set: HANDLE) -> bool {
     device_info_set == SYNTHETIC_DEVICE_INFO_SET
-        || is_synthetic_eligible_device_info_set(device_info_set)
-}
-
-fn remember_synthetic_eligible_device_info_set(device_info_set: HANDLE) {
-    if device_info_set == INVALID_HANDLE_VALUE {
-        return;
-    }
-    let set_value = device_info_set as usize;
-    let Ok(mut guard) = SYNTHETIC_ELIGIBLE_DEVICE_INFO_SETS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-    else {
-        return;
-    };
-    if !guard.contains(&set_value) {
-        guard.push(set_value);
-    }
-}
-
-fn is_synthetic_eligible_device_info_set(device_info_set: HANDLE) -> bool {
-    let set_value = device_info_set as usize;
-    SYNTHETIC_ELIGIBLE_DEVICE_INFO_SETS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .is_ok_and(|guard| guard.contains(&set_value))
-}
-
-fn synthetic_enum_base_index(device_info_set: HANDLE, member_index: u32) -> u32 {
-    if device_info_set == SYNTHETIC_DEVICE_INFO_SET {
-        return 0;
-    }
-
-    let set_value = device_info_set as usize;
-    let mut guard = match SYNTHETIC_ENUM_BASES
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-    {
-        Ok(guard) => guard,
-        Err(_) => return member_index,
-    };
-
-    if let Some((_, base)) = guard
-        .iter()
-        .find(|(stored_set, _)| *stored_set == set_value)
-    {
-        return *base;
-    }
-
-    guard.push((set_value, member_index));
-    member_index
 }
 
 unsafe fn synthesize_device_interface_detail_w(
@@ -1174,6 +1157,14 @@ unsafe fn virtual_profile_for_device_interface_data(
     virtual_profile_for_interface_reserved(data.reserved)
 }
 
+unsafe fn device_interface_data_has_crosspuck_reserved(device_interface_data: *mut c_void) -> bool {
+    if device_interface_data.is_null() {
+        return false;
+    }
+    let data = &*(device_interface_data as *const SpDeviceInterfaceData);
+    is_crosspuck_interface_reserved(data.reserved)
+}
+
 unsafe fn virtual_profile_for_device_info_data(
     device_info_data: *mut c_void,
 ) -> Option<VirtualHidProfile> {
@@ -1237,7 +1228,7 @@ fn interface_reserved(profile: VirtualHidProfile) -> usize {
 }
 
 fn virtual_profile_for_interface_reserved(reserved: usize) -> Option<VirtualHidProfile> {
-    if reserved & 0xFFFF_FFFF_FFFF_0000 != VIRTUAL_INTERFACE_RESERVED_BASE {
+    if !is_crosspuck_interface_reserved(reserved) {
         return None;
     }
     match (reserved & 0xFFFF) as u8 {
@@ -1248,6 +1239,10 @@ fn virtual_profile_for_interface_reserved(reserved: usize) -> Option<VirtualHidP
         6 => Some(VirtualHidProfile::VendorDongle),
         _ => None,
     }
+}
+
+fn is_crosspuck_interface_reserved(reserved: usize) -> bool {
+    reserved & 0xFFFF_FFFF_FFFF_0000 == VIRTUAL_INTERFACE_RESERVED_BASE
 }
 
 fn synthetic_devinst(profile: VirtualHidProfile) -> u32 {

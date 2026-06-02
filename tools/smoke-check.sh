@@ -92,6 +92,16 @@ check_log() {
   fi
 }
 
+check_optional_log() {
+  local label="$1"
+  local pattern="$2"
+  if [[ -f "$log_file" ]] && grep -Eq "$pattern" "$log_file"; then
+    echo "OK   optional log marker: $label"
+  else
+    echo "INFO optional log marker missing: $label"
+  fi
+}
+
 check_file "installed driver" "$driver_dll"
 check_file "driver log" "$log_file"
 
@@ -103,11 +113,11 @@ if [[ -f "$wine_override_reg" ]]; then
 fi
 
 check_log "DLL attach" "crosspuck-driver attached"
-check_log "hook install" "hook install ok|hook groups installed"
 check_log "host bridge/catalog result" "startup bridge connect|lazy bridge connect|catalog available|CreateFile virtual|SDL_hid_enumerate|SetupDiGetClassDevs"
 check_log "HID discovery or caps" "HidP_GetCaps|SetupDi|CreateFile|SDL_hid_enumerate|SDL_hid_open_path"
-check_log "input/feature/write trace" "ReadFile|HidD_GetInputReport|HidD_GetFeature|HidD_SetFeature|HidD_SetOutputReport|WriteFile|SDL_hid_read_timeout|SDL_hid_get_feature_report|SDL_hid_send_feature_report|SDL_hid_write"
-check_log "DeviceIoControl trace" "DeviceIoControl"
+check_optional_log "debug hook install" "hook install ok|hook groups installed"
+check_optional_log "trace input/feature/write" "ReadFile|HidD_GetInputReport|HidD_GetFeature|HidD_SetFeature|HidD_SetOutputReport|WriteFile|SDL_hid_read_timeout|SDL_hid_get_feature_report|SDL_hid_send_feature_report|SDL_hid_write"
+check_optional_log "trace DeviceIoControl" "DeviceIoControl"
 
 if [[ "$failures" -gt 0 ]]; then
   exit 1
@@ -118,4 +128,4 @@ echo "Bottle: $bottle_name"
 echo "Steam:  $steam_exe"
 echo "Log:    $log_file"
 echo
-echo "WARN markers are smoke hints, not hard failures. Missing trace markers usually mean Steam did not load the DLL, the host app was not running, or the relevant UI path was not exercised yet."
+echo "WARN markers indicate required smoke signals. INFO optional markers are expected to be absent unless debug/trace logging is enabled or the relevant UI path was exercised."

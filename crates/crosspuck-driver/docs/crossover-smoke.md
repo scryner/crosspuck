@@ -45,7 +45,7 @@ CrossOver smoke build target on macOS.
 Install next to `Steam.exe`, not into `drive_c/windows/system32`.
 
 ```sh
-tools/install-driver.sh --bottle Steam
+tools/install-driver.sh --bottle Steam --override-dll
 ```
 
 Optional flags:
@@ -54,6 +54,7 @@ Optional flags:
 tools/install-driver.sh \
   --bottle Steam \
   --driver target/x86_64-pc-windows-gnu/release/hid.dll \
+  --override-dll \
   --no-build
 ```
 
@@ -62,8 +63,8 @@ The script:
 - copies `hid.dll` into the detected Steam directory,
 - backs up an existing local `hid.dll` under `crosspuck-backups/`,
 - initializes `crosspuck-driver.log` in the Steam directory,
-- writes `crosspuck-wine-override.reg` in the bottle and imports it with
-  CrossOver `regedit`.
+- when `--override-dll` is set, writes `crosspuck-wine-override.reg` in the
+  bottle and imports it with CrossOver `regedit`.
 
 The installer does not write guest runtime `CROSSPUCK_*` registry/environment
 settings. Guest runtime settings use built-in defaults unless the macOS host app
@@ -72,7 +73,7 @@ sends overrides over the bridge connection.
 ## Wine Loader Override
 
 The install script generates and imports the loader-only Wine override registry
-file automatically.
+file only when run with `--override-dll`.
 
 The generated file is kept in the same bottle:
 
@@ -118,7 +119,6 @@ Expected early log markers:
 
 ```text
 [crosspuck] crosspuck-driver attached ... host_bridge=true required=true ...
-[crosspuck] startup bridge connect skipped: lazy connect enabled
 ```
 
 `hook install ok` and API-level discovery lines are debug-level logs. They are
@@ -168,8 +168,10 @@ After the UI pass, run:
 tools/smoke-check.sh --bottle Steam
 ```
 
-Hard failures mean the DLL or log file is missing. Warnings mean a log marker
-was not observed. Common warning causes:
+Hard failures mean the DLL or log file is missing. Warnings mean a required
+smoke marker was not observed. Optional INFO markers are expected to be absent
+unless debug/trace logging is enabled or the relevant UI path was exercised.
+Common warning causes:
 
 - Steam did not load the local `hid.dll`.
 - The host app was not running.
