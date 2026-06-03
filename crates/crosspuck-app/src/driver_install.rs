@@ -675,7 +675,16 @@ fn import_registry_file(
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or(DEFAULT_STEAM_BOTTLE_NAME);
-    let output = Command::new(&tool.wine_path)
+    let mut command = Command::new(&tool.wine_path);
+    // CrossOver resolves `--bottle` names against its own configured bottles
+    // directory, which can differ from the directory CrossPuck discovered the
+    // bottle in (for example when bottles live on an external drive). Pin
+    // CX_BOTTLE_PATH, which CrossOver honors first, to the discovered bottle's
+    // parent so the import targets exactly the bottle that was inspected.
+    if let Some(bottles_dir) = bottle_path.parent() {
+        command.env("CX_BOTTLE_PATH", bottles_dir);
+    }
+    let output = command
         .arg("--bottle")
         .arg(bottle_name)
         .arg("--no-gui")
@@ -1116,6 +1125,7 @@ mod tests {
         let log = fs::read_to_string(wine_log).unwrap();
         assert!(log.contains("--bottle Steam --no-gui regedit /S"));
         assert!(log.contains(reg_file_path.to_str().unwrap()));
+        assert!(log.contains(&format!("CX_BOTTLE_PATH={}", dir.path().display())));
     }
 
     #[test]
@@ -1243,7 +1253,8 @@ mod tests {
             &wine_path,
             format!(
                 r#"#!/bin/sh
-printf '%s\n' "$*" >> {}
+printf '%s\n' "$*" >> {0}
+printf 'CX_BOTTLE_PATH=%s\n' "${{CX_BOTTLE_PATH:-}}" >> {0}
 last=''
 for arg in "$@"; do
   last="$arg"
