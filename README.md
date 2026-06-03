@@ -3,6 +3,8 @@
 [![License: Apache 2.0](https://img.shields.io/github/license/scryner/crosspuck)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/scryner/crosspuck)](https://github.com/scryner/crosspuck/releases/latest)
 
+![CrossPuck demo showing Steam Controller input in CrossOver Steam](docs/assets/crosspuck-poster.jpg)
+
 CrossPuck lets Steam running in a CrossOver bottle use a Steam Controller
 connected to the macOS host.
 

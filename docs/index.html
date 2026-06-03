@@ -1,0 +1,1212 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>CrossPuck - Steam Controller support for CrossOver Steam</title>
+        <meta
+            name="description"
+            content="CrossPuck lets Steam running in a CrossOver bottle use a Steam Controller connected to the macOS host."
+        >
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link
+            href="https://fonts.googleapis.com/css2?family=Asta+Sans:wght@300;400&amp;family=Inter:wght@300;400;500;600&amp;display=swap"
+            rel="stylesheet"
+        >
+        <link rel="icon" href="assets/crosspuck.svg" type="image/svg+xml">
+        <style>
+            :root {
+                --primary: #3ecf8e;
+                --primary-deep: #24b47e;
+                --ink: #171717;
+                --ink-secondary: #212121;
+                --ink-mute: #707070;
+                --ink-mute-2: #9a9a9a;
+                --canvas: #ffffff;
+                --canvas-soft: #fafafa;
+                --canvas-night: #1c1c1c;
+                --canvas-night-soft: #202020;
+                --hairline: #dfdfdf;
+                --hairline-strong: #c7c7c7;
+                --hairline-cool: #ededed;
+                --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+                --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.08);
+                --radius-xs: 4px;
+                --radius-sm: 6px;
+                --radius-md: 8px;
+                --radius-lg: 12px;
+                --container: 1180px;
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            html {
+                scroll-behavior: smooth;
+            }
+
+            body {
+                margin: 0;
+                background: var(--canvas);
+                color: var(--ink);
+                font-family:
+                    Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+                font-size: 16px;
+                line-height: 1.5;
+                letter-spacing: 0;
+                overflow-x: hidden;
+            }
+
+            a {
+                color: inherit;
+            }
+
+            code,
+            pre {
+                font-family:
+                    ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono",
+                    monospace;
+            }
+
+            .page-shell {
+                min-height: 100vh;
+                background: var(--canvas);
+            }
+
+            .container {
+                width: min(100% - 48px, var(--container));
+                margin: 0 auto;
+            }
+
+            .site-header {
+                position: sticky;
+                top: 0;
+                z-index: 20;
+                border-bottom: 1px solid var(--hairline-cool);
+                background: rgba(255, 255, 255, 0.9);
+                backdrop-filter: blur(16px);
+            }
+
+            .nav {
+                display: flex;
+                min-width: 0;
+                min-height: 72px;
+                align-items: center;
+                justify-content: space-between;
+                gap: 24px;
+            }
+
+            .brand {
+                display: inline-flex;
+                align-items: center;
+                gap: 10px;
+                color: var(--ink);
+                font-size: 15px;
+                font-weight: 600;
+                text-decoration: none;
+            }
+
+            .brand-mark {
+                display: block;
+                width: 44px;
+                height: 44px;
+                object-fit: contain;
+            }
+
+            .nav-links {
+                display: flex;
+                align-items: center;
+                gap: 22px;
+                color: var(--ink-mute);
+                font-size: 14px;
+            }
+
+            .nav-links a {
+                text-decoration: none;
+            }
+
+            .nav-links a:hover {
+                color: var(--ink);
+            }
+
+            .nav-actions {
+                display: flex;
+                min-width: 0;
+                align-items: center;
+                gap: 10px;
+            }
+
+            .button {
+                display: inline-flex;
+                min-height: 36px;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+                border-radius: var(--radius-sm);
+                padding: 8px 16px;
+                font-size: 14px;
+                font-weight: 500;
+                line-height: 1;
+                text-decoration: none;
+                transition:
+                    background-color 160ms ease,
+                    border-color 160ms ease,
+                    transform 160ms ease;
+                white-space: nowrap;
+            }
+
+            .button:hover {
+                transform: translateY(-1px);
+            }
+
+            .button-primary {
+                border: 1px solid var(--primary);
+                background: var(--primary);
+                color: var(--ink);
+            }
+
+            .button-primary:hover {
+                border-color: var(--primary-deep);
+                background: var(--primary-deep);
+            }
+
+            .button-secondary {
+                border: 1px solid var(--hairline-strong);
+                background: var(--canvas);
+                color: var(--ink);
+            }
+
+            .button-dark {
+                border: 1px solid var(--canvas-night);
+                background: var(--canvas-night);
+                color: #fff;
+            }
+
+            .hero {
+                padding: 72px 0 42px;
+            }
+
+            .hero-copy {
+                max-width: 820px;
+                margin: 0 auto 42px;
+                text-align: center;
+            }
+
+            .eyebrow {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                margin: 0 0 18px;
+                color: var(--ink-mute);
+                font-size: 13px;
+            }
+
+            .eyebrow::before {
+                content: "";
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: var(--primary);
+            }
+
+            h1,
+            h2,
+            h3,
+            p {
+                margin-top: 0;
+            }
+
+            h1 {
+                margin-bottom: 22px;
+                font-size: clamp(40px, 7vw, 64px);
+                font-weight: 500;
+                line-height: 1.08;
+                letter-spacing: 0;
+                overflow-wrap: break-word;
+            }
+
+            #hero-title {
+                margin-bottom: 18px;
+                background: linear-gradient(
+                    112deg,
+                    var(--primary-deep) 0%,
+                    var(--primary) 46%,
+                    #4f7cff 100%
+                );
+                background-clip: text;
+                color: var(--primary-deep);
+                font-family:
+                    "Asta Sans", Inter, "Helvetica Neue", Helvetica, Arial,
+                    sans-serif;
+                font-size: clamp(52px, 6vw, 82px);
+                font-weight: 300;
+                line-height: 1;
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
+
+            .hero-lede {
+                max-width: 720px;
+                margin: 0 auto 28px;
+                color: var(--ink-mute);
+                font-size: 18px;
+                line-height: 1.55;
+            }
+
+            .hero-actions {
+                display: flex;
+                flex-wrap: wrap;
+                justify-content: center;
+                gap: 10px;
+            }
+
+            .mockup-stage {
+                position: relative;
+                width: 100%;
+                margin: 0 auto;
+            }
+
+            .hero-video {
+                display: block;
+                width: 100%;
+                aspect-ratio: 2 / 1;
+                background: var(--canvas-night);
+                object-fit: cover;
+            }
+
+            .hero-video:focus-visible {
+                outline: 2px solid var(--primary);
+                outline-offset: 4px;
+            }
+
+            .hero-video-note {
+                max-width: 820px;
+                margin: 14px auto 0;
+                color: var(--ink-mute);
+                font-size: 14px;
+                font-style: italic;
+                line-height: 1.55;
+                text-align: center;
+            }
+
+            .section {
+                padding: 76px 0;
+                border-top: 1px solid var(--hairline-cool);
+            }
+
+            .section-soft {
+                background: rgba(250, 250, 250, 0.92);
+            }
+
+            .section-heading {
+                margin-bottom: 34px;
+            }
+
+            h2 {
+                margin-bottom: 0;
+                font-size: clamp(27px, 3.6vw, 37px);
+                font-weight: 500;
+                line-height: 1.12;
+                letter-spacing: 0;
+            }
+
+            .cards-grid {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 16px;
+            }
+
+            .feature-card {
+                min-width: 0;
+                border: 1px solid var(--hairline);
+                border-radius: var(--radius-md);
+                background: var(--canvas);
+                padding: 28px;
+            }
+
+            .feature-card h3,
+            .step-card h3,
+            .faq-item h3 {
+                margin-bottom: 10px;
+                font-size: 18px;
+                font-weight: 500;
+                line-height: 1.35;
+            }
+
+            .feature-card p,
+            .step-card p,
+            .faq-item p {
+                margin-bottom: 0;
+                color: var(--ink-mute);
+            }
+
+            .check-list {
+                display: grid;
+                gap: 12px;
+                margin: 0;
+                padding: 0;
+                list-style: none;
+            }
+
+            .check-list li {
+                display: flex;
+                gap: 10px;
+                align-items: flex-start;
+                color: var(--ink-secondary);
+            }
+
+            .check-list li::before {
+                content: "";
+                flex: 0 0 auto;
+                width: 8px;
+                height: 8px;
+                margin-top: 8px;
+                border-radius: 50%;
+                background: var(--primary);
+            }
+
+            .steps {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 14px;
+                counter-reset: install-step;
+            }
+
+            .step-card {
+                position: relative;
+                min-width: 0;
+                min-height: 236px;
+                border: 1px solid var(--hairline);
+                border-radius: var(--radius-md);
+                background: var(--canvas);
+                padding: 28px;
+                counter-increment: install-step;
+            }
+
+            .step-card::before {
+                content: counter(install-step);
+                display: grid;
+                width: 30px;
+                height: 30px;
+                margin-bottom: 28px;
+                place-items: center;
+                border-radius: var(--radius-sm);
+                background: var(--primary);
+                color: var(--ink);
+                font-size: 14px;
+                font-weight: 600;
+            }
+
+            .install-visuals {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                align-items: stretch;
+                gap: 16px;
+                margin-top: 16px;
+            }
+
+            .visual-card {
+                display: flex;
+                flex-direction: column;
+                min-width: 0;
+                overflow: hidden;
+                border: 1px solid var(--hairline);
+                border-radius: var(--radius-md);
+                background: var(--canvas);
+            }
+
+            .visual-media {
+                position: relative;
+                display: grid;
+                aspect-ratio: 16 / 10;
+                min-height: 0;
+                overflow: hidden;
+                place-items: center;
+                border-bottom: 1px solid var(--hairline-cool);
+                background: var(--canvas-soft);
+            }
+
+            .visual-media-dark {
+                background: #050505;
+            }
+
+            .visual-media img {
+                display: block;
+                width: auto;
+                height: auto;
+                max-width: 100%;
+                max-height: 100%;
+                object-fit: contain;
+            }
+
+            .visual-card-menu .visual-media img {
+                max-width: min(68%, 520px);
+                max-height: calc(100% - 52px);
+            }
+
+            .visual-card-test .visual-media img {
+                max-width: calc(100% - 12px);
+                max-height: calc(100% - 12px);
+            }
+
+            .visual-card-settings .visual-media img {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                width: auto;
+                height: calc(100% - 12px);
+                max-width: calc(100% - 12px);
+                object-fit: contain;
+                object-position: center center;
+                transform: translate(-50%, -50%);
+            }
+
+            .visual-copy {
+                flex: 1;
+                padding: 18px;
+            }
+
+            .visual-copy h3 {
+                margin-bottom: 8px;
+                font-size: 18px;
+                font-weight: 500;
+                line-height: 1.35;
+            }
+
+            .visual-copy p {
+                margin: 0;
+                color: var(--ink-mute);
+            }
+
+            .split {
+                display: grid;
+                grid-template-columns: minmax(0, 0.92fr) minmax(320px, 0.62fr);
+                gap: 20px;
+                align-items: stretch;
+            }
+
+            .instruction-panel {
+                min-width: 0;
+                border: 1px solid var(--hairline);
+                border-radius: var(--radius-lg);
+                background: var(--canvas);
+                overflow: hidden;
+            }
+
+            .instruction-panel header {
+                border-bottom: 1px solid var(--hairline-cool);
+                padding: 18px 22px;
+            }
+
+            .instruction-panel header h3 {
+                margin: 0;
+                font-size: 18px;
+                font-weight: 500;
+            }
+
+            .numbered-list {
+                margin: 0;
+                padding: 8px 22px 22px 44px;
+                color: var(--ink-secondary);
+            }
+
+            .numbered-list li {
+                margin: 14px 0;
+                padding-left: 4px;
+            }
+
+            .note-card {
+                min-width: 0;
+                border: 1px solid var(--hairline);
+                border-radius: var(--radius-lg);
+                background: var(--canvas-night);
+                color: #fff;
+                padding: 26px;
+            }
+
+            .note-card h3 {
+                margin-bottom: 12px;
+                font-size: 22px;
+                font-weight: 500;
+            }
+
+            .note-card p {
+                color: rgba(255, 255, 255, 0.72);
+            }
+
+            .note-card p + h3 {
+                margin-top: 22px;
+            }
+
+            .note-card code {
+                color: var(--primary);
+            }
+
+            .inline-code {
+                border: 1px solid var(--hairline-cool);
+                border-radius: var(--radius-xs);
+                background: var(--canvas-soft);
+                padding: 2px 5px;
+                color: var(--ink-secondary);
+                font-size: 0.92em;
+            }
+
+            .sr-only {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                overflow: hidden;
+                clip: rect(0, 0, 0, 0);
+                white-space: nowrap;
+            }
+
+            .faq-grid {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 16px;
+            }
+
+            .faq-item {
+                border-top: 1px solid var(--hairline);
+                padding-top: 22px;
+            }
+
+            .site-footer {
+                border-top: 1px solid var(--hairline-cool);
+                padding: 48px 0;
+                color: var(--ink-mute);
+                font-size: 13px;
+            }
+
+            .footer-inner {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 24px;
+            }
+
+            .footer-links {
+                display: flex;
+                gap: 18px;
+            }
+
+            .footer-links a {
+                text-decoration: none;
+            }
+
+            .footer-links a:hover {
+                color: var(--ink);
+            }
+
+            @media (max-width: 1024px) {
+                .split {
+                    grid-template-columns: 1fr;
+                }
+
+                .steps {
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }
+
+                .cards-grid {
+                    grid-template-columns: 1fr;
+                }
+
+                .nav-links {
+                    display: none;
+                }
+            }
+
+            @media (max-width: 760px) {
+                .container {
+                    width: min(100% - 32px, var(--container));
+                }
+
+                .hero {
+                    padding: 36px 0 30px;
+                }
+
+                .hero-copy {
+                    margin-bottom: 24px;
+                    text-align: left;
+                }
+
+                .hero-lede {
+                    margin-bottom: 22px;
+                    font-size: 17px;
+                }
+
+                #hero-title {
+                    font-size: 48px;
+                }
+
+                .hero-actions {
+                    justify-content: flex-start;
+                }
+
+                .nav-actions .button-secondary {
+                    display: none;
+                }
+
+                .steps,
+                .install-visuals,
+                .faq-grid {
+                    grid-template-columns: 1fr;
+                }
+
+                .step-card {
+                    min-height: auto;
+                }
+
+                .section {
+                    padding: 56px 0;
+                }
+
+                .footer-inner {
+                    align-items: flex-start;
+                    flex-direction: column;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="page-shell">
+            <header class="site-header">
+                <nav class="container nav" aria-label="Primary navigation">
+                    <a class="brand" href="#">
+                        <img
+                            class="brand-mark"
+                            src="assets/crosspuck.svg"
+                            width="44"
+                            height="44"
+                            alt=""
+                            aria-hidden="true"
+                        >
+                        <span>CrossPuck</span>
+                    </a>
+                    <div class="nav-links">
+                        <a href="#how-it-works">How it works</a>
+                        <a href="#install">Install</a>
+                        <a href="#verify">Verify</a>
+                        <a href="#faq">FAQ</a>
+                    </div>
+                    <div class="nav-actions">
+                        <a
+                            class="button button-secondary"
+                            href="https://github.com/scryner/crosspuck"
+                        >
+                            GitHub
+                        </a>
+                        <a
+                            class="button button-primary"
+                            href="https://github.com/scryner/crosspuck/releases"
+                        >
+                            Download DMG
+                        </a>
+                    </div>
+                </nav>
+            </header>
+
+            <main>
+                <section class="hero" aria-labelledby="hero-title">
+                    <div class="container">
+                        <div class="hero-copy">
+                            <h1 id="hero-title">CrossPuck</h1>
+                            <p class="hero-lede">
+                                Use the Steam Controller(2026) with CrossOver
+                                Steam,<br>with input and haptics bridged both
+                                ways.
+                            </p>
+                            <div class="hero-actions">
+                                <a
+                                    class="button button-primary"
+                                    href="https://github.com/scryner/crosspuck/releases"
+                                >
+                                    Download latest DMG
+                                </a>
+                                <a
+                                    class="button button-secondary"
+                                    href="#install"
+                                >
+                                    Read install steps
+                                </a>
+                            </div>
+                        </div>
+
+                        <div class="mockup-stage">
+                            <video
+                                class="hero-video"
+                                poster="assets/crosspuck-poster.jpg"
+                                muted
+                                loop
+                                playsinline
+                                preload="metadata"
+                            >
+                                <source
+                                    src="assets/crosspuck.mp4"
+                                    type="video/mp4"
+                                >
+                                <a href="assets/crosspuck.mp4"
+                                    >Download the CrossPuck demo video.</a
+                                >
+                            </video>
+                            <p class="hero-video-note">
+                                Tested with macOS Tahoe and CrossOver 26.1.<br>
+                                Steam Controller must be paired with the Puck
+                                connected to macOS over USB; Bluetooth
+                                connection is not supported.
+                            </p>
+                        </div>
+                    </div>
+                </section>
+
+                <section
+                    class="section section-soft"
+                    id="how-it-works"
+                    aria-labelledby="how-title"
+                >
+                    <div class="container">
+                        <div class="section-heading">
+                            <div>
+                                <h2 id="how-title">
+                                    Steam Controller input on macOS passes
+                                    through to CrossOver
+                                </h2>
+                            </div>
+                        </div>
+                        <div class="cards-grid">
+                            <article class="feature-card">
+                                <h3>Host app on macOS</h3>
+                                <p>
+                                    <span class="inline-code"
+                                        >CrossPuck.app</span
+                                    >
+                                    runs in the menu bar, reads the physical
+                                    controller, and sends input to the guest
+                                    process.
+                                </p>
+                            </article>
+                            <article class="feature-card">
+                                <h3>Guest driver for CrossOver</h3>
+                                <p>
+                                    The bundled
+                                    <span class="inline-code">hid.dll</span>
+                                    exposes controller profiles to Steam and
+                                    forwards non-virtual HID calls to the real
+                                    system HID DLL.
+                                </p>
+                            </article>
+                            <article class="feature-card">
+                                <h3>Feedback comes back</h3>
+                                <p>
+                                    Steam haptics and rumble requests are
+                                    bridged back through the host app so the
+                                    physical controller responds normally.
+                                </p>
+                            </article>
+                        </div>
+                    </div>
+                </section>
+
+                <section
+                    class="section"
+                    id="requirements"
+                    aria-labelledby="requirements-title"
+                >
+                    <div class="container">
+                        <div class="section-heading">
+                            <div>
+                                <h2 id="requirements-title">Requirements</h2>
+                            </div>
+                        </div>
+                        <div class="cards-grid">
+                            <article class="feature-card">
+                                <h3>Mac setup</h3>
+                                <ul class="check-list">
+                                    <li>macOS Tahoe(26) or later</li>
+                                    <li>CrossOver 26.1 or later</li>
+                                    <li>Steam bottle installed</li>
+                                </ul>
+                            </article>
+                            <article class="feature-card">
+                                <h3>Controller setup</h3>
+                                <ul class="check-list">
+                                    <li>Stream Controller paired with Puck</li>
+                                    <li>
+                                        Newer firmware updated from macOS native
+                                        Steam
+                                    </li>
+                                </ul>
+                            </article>
+                            <article class="feature-card">
+                                <h3>Install</h3>
+                                <ul class="check-list">
+                                    <li>
+                                        A CrossPuck
+                                        <span class="inline-code">.dmg</span>
+                                        release
+                                    </li>
+                                    <li>
+                                        Input Monitoring permission for
+                                        CrossPuck.app
+                                    </li>
+                                </ul>
+                            </article>
+                        </div>
+                    </div>
+                </section>
+
+                <section
+                    class="section section-soft"
+                    id="install"
+                    aria-labelledby="install-title"
+                >
+                    <div class="container">
+                        <div class="section-heading">
+                            <div>
+                                <h2 id="install-title">Install from the DMG</h2>
+                            </div>
+                        </div>
+                        <div class="steps">
+                            <article class="step-card">
+                                <h3>Move the app</h3>
+                                <p>
+                                    Open the
+                                    <span class="inline-code">.dmg</span> and
+                                    drag
+                                    <span class="inline-code"
+                                        >CrossPuck.app</span
+                                    >
+                                    into
+                                    <span class="inline-code">Applications</span
+                                    >.
+                                </p>
+                            </article>
+                            <article class="step-card">
+                                <h3>Enable Input Monitoring</h3>
+                                <p>
+                                    Start CrossPuck once, then enable it in
+                                    System Settings, Privacy &amp; Security,
+                                    Input Monitoring. Restart CrossPuck after
+                                    changing the permission.
+                                </p>
+                            </article>
+                            <article class="step-card">
+                                <h3>Install the Steam driver</h3>
+                                <p>
+                                    Quit Steam in the bottle, open the CrossPuck
+                                    menu, and choose
+                                    <span class="inline-code"
+                                        >Install Steam Driver...</span
+                                    >.
+                                </p>
+                            </article>
+                            <article class="step-card">
+                                <h3>Launch Steam</h3>
+                                <p>
+                                    Keep CrossPuck running, then start Steam
+                                    from the CrossOver bottle. Steam should see
+                                    the bridged controller.
+                                </p>
+                            </article>
+                        </div>
+                        <div class="install-visuals">
+                            <article class="visual-card visual-card-menu">
+                                <div class="visual-media visual-media-dark">
+                                    <img
+                                        src="assets/install-driver-menu.jpg"
+                                        width="716"
+                                        height="540"
+                                        alt="CrossPuck menu showing Install Steam Driver when the driver is not installed"
+                                        loading="lazy"
+                                        decoding="async"
+                                    >
+                                </div>
+                                <div class="visual-copy">
+                                    <h3>Install from the menu bar</h3>
+                                    <p>
+                                        When the driver is missing, choose
+                                        <span class="inline-code"
+                                            >Install Steam Driver...</span
+                                        >
+                                        from the CrossPuck menu.
+                                    </p>
+                                </div>
+                            </article>
+                            <article class="visual-card visual-card-menu">
+                                <div class="visual-media visual-media-dark">
+                                    <img
+                                        src="assets/repair-driver-menu.jpg"
+                                        width="716"
+                                        height="540"
+                                        alt="CrossPuck menu showing Repair Steam Driver and Uninstall Steam Driver after installation"
+                                        loading="lazy"
+                                        decoding="async"
+                                    >
+                                </div>
+                                <div class="visual-copy">
+                                    <h3>Confirm the installed state</h3>
+                                    <p>
+                                        After installation, the menu changes to
+                                        repair and uninstall actions for the
+                                        Steam driver.
+                                    </p>
+                                </div>
+                            </article>
+                            <article class="visual-card visual-card-settings">
+                                <div class="visual-media visual-media-dark">
+                                    <img
+                                        src="assets/steam-controller-detected.jpg"
+                                        width="1400"
+                                        height="1189"
+                                        alt="Steam settings showing Steam Controller and Steam Controller Puck connected"
+                                        loading="lazy"
+                                        decoding="async"
+                                    >
+                                </div>
+                                <div class="visual-copy">
+                                    <h3>Check Steam Controller settings</h3>
+                                    <p>
+                                        Steam should list the Steam Controller
+                                        and the Steam Controller Puck in
+                                        Controller settings.
+                                    </p>
+                                </div>
+                            </article>
+                            <article class="visual-card visual-card-test">
+                                <div class="visual-media visual-media-dark">
+                                    <img
+                                        src="assets/steam-controller-test.jpg"
+                                        width="1400"
+                                        height="931"
+                                        alt="Steam Controller layout test showing controller input state"
+                                        loading="lazy"
+                                        decoding="async"
+                                    >
+                                </div>
+                                <div class="visual-copy">
+                                    <h3>Run a quick input test</h3>
+                                    <p>
+                                        Open the controller layout test in Steam
+                                        and confirm that buttons, triggers,
+                                        pads, and joystick values respond.
+                                    </p>
+                                </div>
+                            </article>
+                        </div>
+                    </div>
+                </section>
+
+                <section
+                    class="section"
+                    id="verify"
+                    aria-labelledby="verify-title"
+                >
+                    <div class="container">
+                        <div class="section-heading">
+                            <div>
+                                <h2 id="verify-title">
+                                    Verify the Wine DLL override
+                                </h2>
+                            </div>
+                        </div>
+                        <div class="split">
+                            <article class="instruction-panel">
+                                <header>
+                                    <h3>Manual check in CrossOver</h3>
+                                </header>
+                                <ol class="numbered-list">
+                                    <li>
+                                        Open the CrossOver app that owns the
+                                        Steam bottle.
+                                    </li>
+                                    <li>
+                                        Select the Steam bottle and open the
+                                        <span class="inline-code">C:</span>
+                                        drive for the bottle.
+                                    </li>
+                                    <li>
+                                        Confirm
+                                        <span class="inline-code">hid.dll</span>
+                                        is in the same directory as
+                                        <span class="inline-code">Steam.exe</span>.
+                                    </li>
+                                    <li>
+                                        Select the Steam bottle and open Wine
+                                        Configuration.
+                                    </li>
+                                    <li>Open the Libraries tab.</li>
+                                    <li>
+                                        In Existing overrides, confirm
+                                        <span class="inline-code"
+                                            >hid (native, builtin)</span
+                                        >
+                                        is present.
+                                    </li>
+                                    <li>
+                                        If it is missing, add
+                                        <span class="inline-code">hid</span>,
+                                        edit it, and choose Native then Builtin.
+                                    </li>
+                                    <li>Click Apply, then OK.</li>
+                                </ol>
+                            </article>
+                            <aside
+                                class="note-card"
+                                aria-labelledby="override-note-title"
+                            >
+                                <h3 id="override-note-title">
+                                    Check only if Steam can't see it
+                                </h3>
+                                <p>
+                                    If you followed the install steps above,
+                                    CrossPuck should already have configured
+                                    this for you. If Steam still does not see
+                                    the controller, use this check to confirm
+                                    that the DLL and Wine override are set
+                                    correctly.
+                                </p>
+                                <h3>
+                                    Do not replace other overrides
+                                </h3>
+                                <p>
+                                    Only add or edit the
+                                    <code>hid</code> override. Existing DLL
+                                    overrides in the Steam bottle may be
+                                    required by other software.
+                                </p>
+                                <a class="button button-primary" href="#install"
+                                    >Back to install</a
+                                >
+                            </aside>
+                        </div>
+                    </div>
+                </section>
+
+                <section
+                    class="section section-soft"
+                    id="faq"
+                    aria-labelledby="faq-title"
+                >
+                    <div class="container">
+                        <div class="section-heading">
+                            <div>
+                                <h2 id="faq-title">
+                                    Frequently asked questions
+                                </h2>
+                            </div>
+                        </div>
+                        <div class="faq-grid">
+                            <article class="faq-item">
+                                <h3>
+                                    Why does CrossPuck need Input Monitoring
+                                    permission?
+                                </h3>
+                                <p>
+                                    macOS requires this permission before
+                                    CrossPuck can open and read the Steam
+                                    Controller or Steam Puck HID device from the
+                                    host. Without it, the app can wait for the
+                                    CrossOver guest connection, but it cannot
+                                    read controller reports. To be a trustworthy
+                                    macOS app, release builds are signed and go
+                                    through Apple Notarization before
+                                    distribution.
+                                </p>
+                            </article>
+                            <article class="faq-item">
+                                <h3>Where does the driver go?</h3>
+                                <p>
+                                    CrossPuck installs
+                                    <span class="inline-code">hid.dll</span>
+                                    next to
+                                    <span class="inline-code">Steam.exe</span>
+                                    in the target bottle.
+                                </p>
+                            </article>
+                            <article class="faq-item">
+                                <h3>Does it edit user.reg directly?</h3>
+                                <p>
+                                    No. It writes
+                                    <span class="inline-code"
+                                        >crosspuck-wine-override.reg</span
+                                    >
+                                    into the bottle and imports it through
+                                    CrossOver
+                                    <span class="inline-code">regedit</span>.
+                                </p>
+                            </article>
+                            <article class="faq-item">
+                                <h3>Which CrossOver app is supported?</h3>
+                                <p>
+                                    Both
+                                    <span class="inline-code"
+                                        >CrossOver.app</span
+                                    >
+                                    and
+                                    <span class="inline-code"
+                                        >CrossOver Preview.app</span
+                                    >
+                                    are supported, with fallback handling when
+                                    only one is installed.
+                                </p>
+                            </article>
+                            <article class="faq-item">
+                                <h3>Should I install hid.dll into system32?</h3>
+                                <p>
+                                    No. This driver is designed to live next to
+                                    Steam and should not be installed into
+                                    <span class="inline-code"
+                                        >drive_c/windows/system32</span
+                                    >.
+                                </p>
+                            </article>
+                        </div>
+                    </div>
+                </section>
+            </main>
+
+            <footer class="site-footer">
+                <div class="container footer-inner">
+                    <div>
+                        Copyright (c) 2026 scryner. Licensed under the Apache
+                        License, Version 2.0.
+                    </div>
+                    <div class="footer-links">
+                        <a href="https://github.com/scryner/crosspuck"
+                            >Repository</a
+                        >
+                        <a href="https://github.com/scryner/crosspuck/releases"
+                            >Releases</a
+                        >
+                    </div>
+                </div>
+            </footer>
+        </div>
+        <script>
+            (() => {
+                const video = document.querySelector(".hero-video");
+
+                if (!video) {
+                    return;
+                }
+
+                const prefersReducedMotion = window.matchMedia(
+                    "(prefers-reduced-motion: reduce)",
+                ).matches;
+
+                if (prefersReducedMotion) {
+                    video.pause();
+                    return;
+                }
+
+                const playback = video.play();
+
+                if (playback && typeof playback.catch === "function") {
+                    playback.catch(() => {});
+                }
+            })();
+        </script>
+    </body>
+</html>
