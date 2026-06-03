@@ -8,6 +8,8 @@
 CrossPuck lets Steam running in a CrossOver bottle use a Steam Controller
 connected to the macOS host.
 
+_If CrossPuck helps you, a GitHub star would be appreciated._ ⭐
+
 The project is split into two production pieces:
 
 - `crosspuck-app`: a macOS menu bar host app. It reads the physical Steam
