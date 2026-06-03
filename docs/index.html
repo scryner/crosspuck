@@ -1,20 +1,20 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
     <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>CrossPuck - Steam Controller support for CrossOver Steam</title>
         <meta
             name="description"
             content="CrossPuck lets Steam running in a CrossOver bottle use a Steam Controller connected to the macOS host."
-        >
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link
             href="https://fonts.googleapis.com/css2?family=Asta+Sans:wght@300;400&amp;family=Inter:wght@300;400;500;600&amp;display=swap"
             rel="stylesheet"
-        >
-        <link rel="icon" href="assets/crosspuck.svg" type="image/svg+xml">
+        />
+        <link rel="icon" href="assets/crosspuck.svg" type="image/svg+xml" />
         <style>
             :root {
                 --primary: #3ecf8e;
@@ -316,6 +316,40 @@
                 display: grid;
                 grid-template-columns: repeat(3, minmax(0, 1fr));
                 gap: 16px;
+            }
+
+            .requirements-note {
+                width: 100%;
+                margin-top: 16px;
+                border: 1px solid var(--hairline);
+                border-radius: var(--radius-md);
+                background: var(--canvas);
+                padding: 28px;
+                color: var(--ink-secondary);
+            }
+
+            .requirements-note h3 {
+                margin-bottom: 10px;
+                color: var(--ink);
+                font-size: 18px;
+                font-weight: 500;
+                line-height: 1.35;
+            }
+
+            .requirements-note p {
+                margin-bottom: 12px;
+                color: var(--ink-mute);
+                font-size: 15px;
+            }
+
+            .requirements-note ol {
+                margin: 0;
+                padding-left: 22px;
+            }
+
+            .requirements-note li {
+                margin: 8px 0;
+                padding-left: 4px;
             }
 
             .feature-card {
@@ -682,7 +716,7 @@
                             height="44"
                             alt=""
                             aria-hidden="true"
-                        >
+                        />
                         <span>CrossPuck</span>
                     </a>
                     <div class="nav-links">
@@ -715,7 +749,7 @@
                             <h1 id="hero-title">CrossPuck</h1>
                             <p class="hero-lede">
                                 Use the Steam Controller(2026) with CrossOver
-                                Steam,<br>with input and haptics bridged both
+                                Steam,<br />with input and haptics bridged both
                                 ways.
                             </p>
                             <div class="hero-actions">
@@ -746,13 +780,13 @@
                                 <source
                                     src="assets/crosspuck.mp4"
                                     type="video/mp4"
-                                >
+                                />
                                 <a href="assets/crosspuck.mp4"
                                     >Download the CrossPuck demo video.</a
                                 >
                             </video>
                             <p class="hero-video-note">
-                                Tested with macOS Tahoe and CrossOver 26.1.<br>
+                                Tested with macOS Tahoe and CrossOver 26.1.<br />
                                 Steam Controller must be paired with the Puck
                                 connected to macOS over USB; Bluetooth
                                 connection is not supported.
@@ -832,7 +866,7 @@
                             <article class="feature-card">
                                 <h3>Controller setup</h3>
                                 <ul class="check-list">
-                                    <li>Stream Controller paired with Puck</li>
+                                    <li>Steam Controller paired with Puck</li>
                                     <li>
                                         Newer firmware updated from macOS native
                                         Steam
@@ -853,6 +887,52 @@
                                     </li>
                                 </ul>
                             </article>
+                        </div>
+                        <div class="requirements-note">
+                            <h3>Pair the controller before using CrossPuck</h3>
+                            <p>
+                                CrossPuck assumes the Steam Controller is
+                                already paired with the Puck.
+                            </p>
+                            <p>
+                                The pairing information is stored on the Puck,
+                                so this only needs to be done once on any
+                                platform.<br />
+                                If the controller was already paired from macOS,
+                                Windows, or another native Steam setup, you can
+                                skip this step.
+                            </p>
+                            <p>
+                                Steam running in CrossOver can use the
+                                controller after pairing, but it cannot perform
+                                the first pairing step itself.
+                            </p>
+                            <ol>
+                                <li>
+                                    Quit
+                                    <span class="inline-code"
+                                        >CrossPuck.app</span
+                                    >
+                                    first.
+                                </li>
+                                <li>
+                                    Connect the Puck over USB and launch the
+                                    native macOS Steam app.
+                                </li>
+                                <li>
+                                    Keep the Puck connected over USB, then
+                                    connect the Steam Controller to another USB
+                                    port.
+                                </li>
+                                <li>
+                                    Follow Steam's UI to pair or register the
+                                    controller to the Puck.
+                                </li>
+                                <li>
+                                    Quit native Steam, start CrossPuck, then
+                                    launch Steam from the CrossOver bottle.
+                                </li>
+                            </ol>
                         </div>
                     </div>
                 </section>
@@ -921,7 +1001,7 @@
                                         alt="CrossPuck menu showing Install Steam Driver when the driver is not installed"
                                         loading="lazy"
                                         decoding="async"
-                                    >
+                                    />
                                 </div>
                                 <div class="visual-copy">
                                     <h3>Install from the menu bar</h3>
@@ -943,7 +1023,7 @@
                                         alt="CrossPuck menu showing Repair Steam Driver and Uninstall Steam Driver after installation"
                                         loading="lazy"
                                         decoding="async"
-                                    >
+                                    />
                                 </div>
                                 <div class="visual-copy">
                                     <h3>Confirm the installed state</h3>
@@ -963,7 +1043,7 @@
                                         alt="Steam settings showing Steam Controller and Steam Controller Puck connected"
                                         loading="lazy"
                                         decoding="async"
-                                    >
+                                    />
                                 </div>
                                 <div class="visual-copy">
                                     <h3>Check Steam Controller settings</h3>
@@ -983,7 +1063,7 @@
                                         alt="Steam Controller layout test showing controller input state"
                                         loading="lazy"
                                         decoding="async"
-                                    >
+                                    />
                                 </div>
                                 <div class="visual-copy">
                                     <h3>Run a quick input test</h3>
