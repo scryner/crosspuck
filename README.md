@@ -57,6 +57,19 @@ The installer handles both `/Applications/CrossOver.app` and
 CrossOver Preview first; regular bottles import through CrossOver first; the
 other app is used as a fallback when only one is installed.
 
+### Bottles In A Non-Default Location
+
+CrossPuck auto-detects the Steam bottle under
+`~/Library/Application Support/CrossOver/Bottles` by default. If your bottle
+lives elsewhere (for example on an external drive), or several bottles have
+Steam installed, use the menu bar `Advanced` > `Bottle Path` >
+`Choose Bottle...` item to pick the CrossOver bottle CrossPuck should use. The
+choice is remembered across launches; the `Bottle:` line shows the bottle
+currently in use, and `Reset to Default` returns to auto-detection. Two
+environment variables override this for scripting: `CROSSPUCK_BOTTLE_PATH`
+selects a specific bottle and takes precedence over the menu selection, and
+`CROSSPUCK_BOTTLES_DIR` changes the directory that auto-detection scans.
+
 ### Verify Wine DLL Override
 
 If Steam does not see the controller, verify the Wine DLL override manually:

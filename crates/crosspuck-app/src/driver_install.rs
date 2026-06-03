@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BOTTLE_PATH_ENV: &str = "CROSSPUCK_BOTTLE_PATH";
+pub const BOTTLE_PATH_ENV: &str = "CROSSPUCK_BOTTLE_PATH";
 const EMBEDDED_DRIVER_PATH_ENV: &str = "CROSSPUCK_EMBEDDED_DRIVER_PATH";
 const DEFAULT_STEAM_BOTTLE_NAME: &str = "Steam";
 const DRIVER_TARGET_RELATIVE_PATH: &[&str] =
@@ -818,7 +818,7 @@ fn default_repo_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn default_crossover_bottles_dir() -> Option<PathBuf> {
+pub fn default_crossover_bottles_dir() -> Option<PathBuf> {
     let home = env::var_os("HOME").map(PathBuf::from)?;
     Some(
         CROSSOVER_BOTTLES_RELATIVE_PATH
