@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "crosspuck-app"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "crosspuck-core",
  "log",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "crosspuck-cli"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "crosspuck-core",
  "hidapi",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "crosspuck-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "hidapi",
  "serde",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "crosspuck-driver"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "crosspuck-core",
  "min_hook_rs",
