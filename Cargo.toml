@@ -11,7 +11,7 @@ resolver = "2"
 version = "0.3.1"
 edition = "2021"
 license = "Apache-2.0"
-authors = ["Seonghwan Jeong <scryner@gmail.com>"]
+authors = ["scryner <scryner@gmail.com>"]
 
 [workspace.dependencies]
 crosspuck-core = { path = "crates/crosspuck-core" }

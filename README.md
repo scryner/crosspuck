@@ -243,6 +243,8 @@ the macOS HID reference probe are documented in `tools/README.md`.
 
 ## License
 
+Copyright 2026 scryner and CrossPuck contributors.
+
 CrossPuck is licensed under the Apache License, Version 2.0. See
 `LICENSE`.
 
