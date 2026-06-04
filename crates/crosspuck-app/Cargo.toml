@@ -30,12 +30,16 @@ objc2-app-kit = { workspace = true, features = [
     "NSImage",
     "NSMenu",
     "NSMenuItem",
+    "NSOpenPanel",
+    "NSPanel",
     "NSResponder",
     "NSRunningApplication",
+    "NSSavePanel",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
     "NSView",
+    "NSWindow",
     "objc2-core-foundation",
 ] }
 objc2-foundation = { workspace = true, features = [
@@ -45,6 +49,8 @@ objc2-foundation = { workspace = true, features = [
     "NSObject",
     "NSString",
     "NSTimer",
+    "NSURL",
+    "NSUserDefaults",
 ] }
 oslog.workspace = true
 pprof = { version = "0.15.0", optional = true, features = ["flamegraph"] }

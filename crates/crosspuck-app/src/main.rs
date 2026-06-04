@@ -34,6 +34,8 @@ mod probe {
 #[cfg(target_os = "macos")]
 mod runtime;
 #[cfg(target_os = "macos")]
+mod settings;
+#[cfg(target_os = "macos")]
 mod user_activity;
 
 #[cfg(target_os = "macos")]
@@ -63,12 +65,13 @@ mod macos {
     };
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSCellImagePosition, NSImage, NSImageScaling,
-        NSMenu, NSMenuDelegate, NSMenuItem, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
+        NSMenu, NSMenuDelegate, NSMenuItem, NSModalResponseOK, NSOpenPanel,
+        NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
     };
     use objc2_foundation::{
-        NSAutoreleasePool, NSBundle, NSObject, NSObjectProtocol, NSString, NSTimer,
+        NSAutoreleasePool, NSBundle, NSObject, NSObjectProtocol, NSString, NSTimer, NSURL,
     };
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::ExitCode;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -81,6 +84,7 @@ mod macos {
         _menu_delegate: Retained<StateMenuDelegate>,
         _refresh_timer: Retained<NSTimer>,
         _driver_controller: Retained<DriverInstallController>,
+        _bottle_controller: Retained<BottleController>,
         _quit_controller: Retained<QuitController>,
     }
 
@@ -93,6 +97,9 @@ mod macos {
         driver_status: Retained<NSMenuItem>,
         driver_action: Retained<NSMenuItem>,
         driver_uninstall: Retained<NSMenuItem>,
+        bottle_info: Retained<NSMenuItem>,
+        bottle_choose: Retained<NSMenuItem>,
+        bottle_reset: Retained<NSMenuItem>,
     }
 
     #[derive(Clone)]
@@ -213,6 +220,91 @@ mod macos {
         }
     }
 
+    struct BottleControllerIvars {
+        driver_state: Arc<DriverMenuState>,
+        items: StateMenuItems,
+    }
+
+    define_class!(
+        #[unsafe(super = NSObject)]
+        #[thread_kind = objc2::MainThreadOnly]
+        #[ivars = BottleControllerIvars]
+        struct BottleController;
+
+        unsafe impl NSObjectProtocol for BottleController {}
+
+        impl BottleController {
+            #[unsafe(method(chooseBottle:))]
+            fn choose_bottle(&self, _sender: Option<&AnyObject>) {
+                let mtm = self.mtm();
+                let panel = NSOpenPanel::openPanel(mtm);
+                panel.setCanChooseDirectories(true);
+                panel.setCanChooseFiles(false);
+                panel.setAllowsMultipleSelection(false);
+                panel.setMessage(Some(&NSString::from_str(
+                    "Select the CrossOver bottle CrossPuck should use",
+                )));
+
+                // Start next to the current bottle when one is set, otherwise
+                // at the bottles root that auto-detection scans.
+                let context = self.ivars().driver_state.current_context();
+                let start_dir = context
+                    .bottle_path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+                    .or(context.crossover_bottles_dir)
+                    .filter(|path| path.is_dir());
+                if let Some(dir) = start_dir {
+                    let url = NSURL::fileURLWithPath(&NSString::from_str(&dir.to_string_lossy()));
+                    panel.setDirectoryURL(Some(&url));
+                }
+
+                // An accessory (menu bar) app is not frontmost, so bring it
+                // forward before running the modal or the picker hides behind
+                // other windows.
+                activate_app(mtm);
+                if panel.runModal() != NSModalResponseOK {
+                    return;
+                }
+                let Some(path) = panel.URL().and_then(|url| url.path()) else {
+                    return;
+                };
+                let path = PathBuf::from(path.to_string());
+                crate::settings::set_stored_bottle_path(&path);
+                self.apply_bottle_path_change();
+            }
+
+            #[unsafe(method(resetBottle:))]
+            fn reset_bottle(&self, _sender: Option<&AnyObject>) {
+                crate::settings::clear_stored_bottle_path();
+                self.apply_bottle_path_change();
+            }
+        }
+    );
+
+    impl BottleController {
+        fn new(
+            mtm: MainThreadMarker,
+            driver_state: Arc<DriverMenuState>,
+            items: StateMenuItems,
+        ) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(BottleControllerIvars {
+                driver_state,
+                items,
+            });
+            unsafe { msg_send![super(this), init] }
+        }
+
+        fn apply_bottle_path_change(&self) {
+            let driver_state = &self.ivars().driver_state;
+            driver_state.set_bottle_path(crate::settings::resolve_bottle_path());
+            driver_state.refresh_status();
+            refresh_driver_items(driver_state, &self.ivars().items);
+            refresh_bottle_items(driver_state, &self.ivars().items);
+        }
+    }
+
     struct QuitControllerIvars {
         app: Retained<NSApplication>,
         service_handle: HostServiceHandle,
@@ -305,12 +397,15 @@ mod macos {
 
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
-        let driver_state = Arc::new(DriverMenuState::new(
-            DriverInstallContext::from_environment(bundle_resources_dir()),
-        ));
+        let mut driver_context = DriverInstallContext::from_environment(bundle_resources_dir());
+        driver_context.crossover_bottles_dir = crate::settings::resolve_bottles_dir();
+        driver_context.bottle_path = crate::settings::resolve_bottle_path();
+        let driver_state = Arc::new(DriverMenuState::new(driver_context));
         driver_state.refresh_status();
 
         let empty_key = NSString::from_str("");
+        let bottle_menu = NSMenu::new(mtm);
+        bottle_menu.setAutoenablesItems(false);
         let state_items = StateMenuItems {
             status: menu.addItemWithTitle_action_keyEquivalent(
                 &NSString::from_str("Status: Starting"),
@@ -351,12 +446,46 @@ mod macos {
                 Some(sel!(uninstallDriver:)),
                 &empty_key,
             ),
+            bottle_info: bottle_menu.addItemWithTitle_action_keyEquivalent(
+                &NSString::from_str("Bottle: -"),
+                None,
+                &empty_key,
+            ),
+            bottle_choose: bottle_menu.addItemWithTitle_action_keyEquivalent(
+                &NSString::from_str("Choose Bottle..."),
+                Some(sel!(chooseBottle:)),
+                &empty_key,
+            ),
+            bottle_reset: bottle_menu.addItemWithTitle_action_keyEquivalent(
+                &NSString::from_str("Reset to Default"),
+                Some(sel!(resetBottle:)),
+                &empty_key,
+            ),
         };
         state_items.status.setEnabled(false);
         state_items.puck.setEnabled(false);
         state_items.guest.setEnabled(false);
         state_items.error.setEnabled(false);
         state_items.driver_status.setEnabled(false);
+        state_items.bottle_info.setEnabled(false);
+
+        // Advanced > Bottle Path > (bottle items)
+        let separator = NSMenuItem::separatorItem(mtm);
+        menu.addItem(&separator);
+        let advanced_menu = NSMenu::new(mtm);
+        advanced_menu.setAutoenablesItems(false);
+        let bottle_path_item = advanced_menu.addItemWithTitle_action_keyEquivalent(
+            &NSString::from_str("Bottle Path"),
+            None,
+            &empty_key,
+        );
+        bottle_path_item.setSubmenu(Some(&bottle_menu));
+        let advanced_item = menu.addItemWithTitle_action_keyEquivalent(
+            &NSString::from_str("Advanced"),
+            None,
+            &empty_key,
+        );
+        advanced_item.setSubmenu(Some(&advanced_menu));
 
         let driver_controller =
             DriverInstallController::new(mtm, Arc::clone(&driver_state), state_items.clone());
@@ -366,6 +495,15 @@ mod macos {
         state_items
             .driver_uninstall
             .setTarget(Some(driver_controller.as_ref()));
+
+        let bottle_controller =
+            BottleController::new(mtm, Arc::clone(&driver_state), state_items.clone());
+        state_items
+            .bottle_choose
+            .setTarget(Some(bottle_controller.as_ref()));
+        state_items
+            .bottle_reset
+            .setTarget(Some(bottle_controller.as_ref()));
 
         let menu_delegate = StateMenuDelegate::new(
             mtm,
@@ -404,6 +542,7 @@ mod macos {
             _menu_delegate: menu_delegate,
             _refresh_timer: refresh_timer,
             _driver_controller: driver_controller,
+            _bottle_controller: bottle_controller,
             _quit_controller: quit_controller,
         }
     }
@@ -428,6 +567,53 @@ mod macos {
             .error
             .setTitle(&NSString::from_str(&format!("Last error: {}", view.error)));
         refresh_driver_items(driver_state, items);
+        refresh_bottle_items(driver_state, items);
+    }
+
+    fn refresh_bottle_items(driver_state: &DriverMenuState, items: &StateMenuItems) {
+        let env_override = crate::settings::env_override_active();
+        // When CROSSPUCK_BOTTLE_PATH is set it wins over any menu selection, so
+        // say so and disable the picker rather than letting Choose/Reset look
+        // like they do nothing.
+        let label = match driver_state.current_context().bottle_path.as_deref() {
+            Some(path) if env_override => {
+                format!(
+                    "Bottle: {} (set by CROSSPUCK_BOTTLE_PATH)",
+                    display_path(path)
+                )
+            }
+            Some(path) => format!("Bottle: {}", display_path(path)),
+            None => match driver_state.discovered_bottle() {
+                Some(path) => format!("Bottle: {} (auto)", display_path(&path)),
+                None => "Bottle: (auto)".to_string(),
+            },
+        };
+        items.bottle_info.setTitle(&NSString::from_str(&label));
+        items.bottle_choose.setEnabled(!env_override);
+        // "Reset to Default" only makes sense when a bottle has been chosen and
+        // the env var is not overriding it.
+        items
+            .bottle_reset
+            .setEnabled(!env_override && crate::settings::stored_bottle_path().is_some());
+    }
+
+    fn display_path(path: &Path) -> String {
+        if let Some(home) = std::env::var_os("HOME") {
+            if let Ok(rest) = path.strip_prefix(&home) {
+                if rest.as_os_str().is_empty() {
+                    return "~".to_string();
+                }
+                return format!("~/{}", rest.display());
+            }
+        }
+        path.display().to_string()
+    }
+
+    // `NSApplication::activate()` is the modern replacement but is macOS 14+
+    // only, so keep using `activateIgnoringOtherApps` for broader compatibility.
+    #[allow(deprecated)]
+    fn activate_app(mtm: MainThreadMarker) {
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
     }
 
     fn refresh_driver_items(driver_state: &DriverMenuState, items: &StateMenuItems) {
@@ -447,7 +633,7 @@ mod macos {
 
     #[derive(Debug)]
     struct DriverMenuState {
-        context: DriverInstallContext,
+        context: Mutex<DriverInstallContext>,
         snapshot: Mutex<DriverMenuSnapshot>,
     }
 
@@ -473,9 +659,38 @@ mod macos {
     impl DriverMenuState {
         fn new(context: DriverInstallContext) -> Self {
             Self {
-                context,
+                context: Mutex::new(context),
                 snapshot: Mutex::new(DriverMenuSnapshot::Checking),
             }
+        }
+
+        /// Clone the current install context. The bottles root inside it can be
+        /// swapped at runtime via [`set_bottles_dir`], so callers always read a
+        /// fresh copy rather than capturing it once.
+        fn current_context(&self) -> DriverInstallContext {
+            self.context
+                .lock()
+                .map(|context| context.clone())
+                .unwrap_or_default()
+        }
+
+        /// Point the driver workflow at an explicit CrossOver bottle, or
+        /// `None` to fall back to automatic detection.
+        fn set_bottle_path(&self, bottle_path: Option<PathBuf>) {
+            if let Ok(mut context) = self.context.lock() {
+                context.bottle_path = bottle_path;
+            }
+        }
+
+        /// Bottle found by the most recent driver status check, if any.
+        fn discovered_bottle(&self) -> Option<PathBuf> {
+            self.snapshot
+                .lock()
+                .ok()
+                .and_then(|snapshot| match &*snapshot {
+                    DriverMenuSnapshot::Status(status) => status.bottle_path.clone(),
+                    _ => None,
+                })
         }
 
         fn refresh_status(&self) {
@@ -484,7 +699,7 @@ mod macos {
             }
             crate::probe::note_driver_status_check();
 
-            let status = check_driver_install_status(&self.context);
+            let status = check_driver_install_status(&self.current_context());
             if let Ok(mut snapshot) = self.snapshot.lock() {
                 *snapshot = DriverMenuSnapshot::Status(status);
             }
@@ -501,7 +716,7 @@ mod macos {
             drop(snapshot);
 
             let state = Arc::clone(self);
-            let context = self.context.clone();
+            let context = self.current_context();
             thread::spawn(move || {
                 let next = match install_driver(&context) {
                     Ok(result) => {
@@ -544,7 +759,7 @@ mod macos {
             drop(snapshot);
 
             let state = Arc::clone(self);
-            let context = self.context.clone();
+            let context = self.current_context();
             thread::spawn(move || {
                 let next = match uninstall_driver(&context) {
                     Ok(result) => {
