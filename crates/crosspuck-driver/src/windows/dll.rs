@@ -1,5 +1,5 @@
 use super::{
-    hooks,
+    discovery, hooks,
     log::{debug_line, error_line, info_line, set_log_level},
     state,
 };
@@ -8,7 +8,10 @@ use std::ffi::c_void;
 use std::panic;
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{HINSTANCE, TRUE};
-use windows_sys::Win32::System::LibraryLoader::DisableThreadLibraryCalls;
+use windows_sys::Win32::System::LibraryLoader::{
+    DisableThreadLibraryCalls, GetModuleHandleExA, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    GET_MODULE_HANDLE_EX_FLAG_PIN,
+};
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 
 #[no_mangle]
@@ -25,9 +28,9 @@ pub unsafe extern "system" fn DllMain(
             });
         }
         DLL_PROCESS_DETACH => {
-            if let Some(runtime) = state::runtime() {
-                runtime.clear_bridge("dll detach");
-            }
+            // Do not join workers or take runtime locks under the loader lock.
+            // At process exit Windows closes the transport handles for us.
+            discovery::stop();
         }
         _ => {}
     }
@@ -35,6 +38,20 @@ pub unsafe extern "system" fn DllMain(
 }
 
 fn attach() {
+    // Hooks and the discovery worker have process lifetime. Keep their code
+    // mapped even if a caller releases its reference to the proxy DLL.
+    let mut module = std::ptr::null_mut();
+    if unsafe {
+        GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            DllMain as *const u8,
+            &mut module,
+        )
+    } == 0
+    {
+        error_line("[crosspuck] could not pin driver module; skipping hooks");
+        return;
+    }
     let config = RuntimeConfig::driver_defaults();
     set_log_level(config.log_level);
     let host_bridge_enabled = config.host_bridge_enabled;
@@ -59,6 +76,7 @@ fn attach() {
 
     if let Err(error) = hooks::install() {
         error_line(&format!("[crosspuck] hook install failed: {error}"));
+        return;
     } else {
         debug_line("[crosspuck] hook install ok");
     }
@@ -76,4 +94,8 @@ fn attach() {
         "[crosspuck] driver timeouts connect_ms={} handshake_ms={} io_ms={} reconnect_ms={}",
         connect_timeout_ms, handshake_timeout_ms, io_timeout_ms, reconnect_interval_ms
     ));
+    if bridge_connect_allowed && host_bridge_enabled {
+        // attach already runs outside DllMain on its own worker thread.
+        discovery::run();
+    }
 }

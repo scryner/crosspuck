@@ -1,3 +1,7 @@
+#[cfg(any(windows, test))]
+mod discovery_state;
+#[cfg(any(windows, test))]
+mod sdl_enumeration;
 #[cfg(windows)]
 mod windows;
 

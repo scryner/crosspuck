@@ -113,9 +113,11 @@ if [[ -f "$wine_override_reg" ]]; then
 fi
 
 check_log "DLL attach" "crosspuck-driver attached"
-check_log "host bridge/catalog result" "startup bridge connect|lazy bridge connect|catalog available|CreateFile virtual|SDL_hid_enumerate|SetupDiGetClassDevs"
+check_log "host bridge connection success" "(startup|lazy) bridge connect ok"
+check_log "automatic discovery worker" "automatic discovery worker started"
 check_log "HID discovery or caps" "HidP_GetCaps|SetupDi|CreateFile|SDL_hid_enumerate|SDL_hid_open_path"
 check_optional_log "debug hook install" "hook install ok|hook groups installed"
+check_optional_log "automatic SDL arrival (required for late-start test)" "automatic discovery notified SDL change=Arrival"
 check_optional_log "trace input/feature/write" "ReadFile|HidD_GetInputReport|HidD_GetFeature|HidD_SetFeature|HidD_SetOutputReport|WriteFile|SDL_hid_read_timeout|SDL_hid_get_feature_report|SDL_hid_send_feature_report|SDL_hid_write"
 check_optional_log "trace DeviceIoControl" "DeviceIoControl"
 

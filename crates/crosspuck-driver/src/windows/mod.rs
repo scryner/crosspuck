@@ -1,4 +1,5 @@
 mod buffers;
+mod discovery;
 mod dll;
 mod errors;
 mod handles;

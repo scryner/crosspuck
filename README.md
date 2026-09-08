@@ -50,7 +50,9 @@ source tree are not required.
 7. Use the CrossPuck menu bar "Install Steam Driver..." item. This installs
    `hid.dll` next to `Steam.exe` and imports the Wine loader override registry
    file.
-8. Keep CrossPuck running, then start Steam from the CrossOver bottle.
+8. Start Steam from the CrossOver bottle. After installing the driver, CrossPuck
+   and Steam can be started in either order. Starting or restarting CrossPuck
+   while Steam is running automatically reconnects the controller.
 
 The installer handles both `/Applications/CrossOver.app` and
 `/Applications/CrossOver Preview.app`. Preview-marked bottles import through
@@ -167,7 +169,9 @@ app before packaging, or notarize and staple the generated DMG after packaging.
 
 ### Run The Built App And Install Driver
 
-Start the app before launching Steam in the CrossOver bottle. On macOS, grant
+CrossPuck and Steam can be started in either order once the driver is installed.
+Steam must be restarted after installing or updating the driver so it loads the
+new DLL. On macOS, grant
 CrossPuck Input Monitoring permission when prompted; without it the app can
 listen for guest connections but cannot open the Steam Controller HID device.
 If permission was denied earlier, enable it in `System Settings` >

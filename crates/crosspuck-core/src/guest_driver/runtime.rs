@@ -6,7 +6,8 @@ use super::profile::{VirtualHidProfile, VirtualHidProfileCatalog};
 use super::trace::TraceLimiter;
 use crate::protocol::{GuestRuntimeOverrides, LogSeverity};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 const DEFAULT_GET_FEATURE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -20,6 +21,8 @@ pub struct GuestDriverRuntime {
     catalog: Mutex<Option<VirtualHidProfileCatalog>>,
     handles: Mutex<VirtualHandleTable>,
     last_connect_attempt: Mutex<Option<Instant>>,
+    connection_transition: Mutex<()>,
+    connection_generation: AtomicU64,
     trace_limiter: Mutex<TraceLimiter>,
 }
 
@@ -51,6 +54,8 @@ impl GuestDriverRuntime {
             catalog: Mutex::new(catalog),
             handles: Mutex::new(VirtualHandleTable::default()),
             last_connect_attempt: Mutex::new(None),
+            connection_transition: Mutex::new(()),
+            connection_generation: AtomicU64::new(0),
             trace_limiter: Mutex::new(trace_limiter),
         }
     }
@@ -91,6 +96,15 @@ impl GuestDriverRuntime {
             .lock()
             .ok()
             .and_then(|bridge| bridge.as_ref().map(|bridge| bridge.info().session_trace_id))
+    }
+
+    /// Process-local generation of the usable connection, independent of the
+    /// host's session IDs (which can repeat after a host restart).
+    pub fn live_connection_generation(&self) -> Option<u64> {
+        let bridge = self.bridge.lock().ok()?;
+        let stats = bridge.as_ref()?.input_stats();
+        (stats.read_errors == 0 && stats.command_errors == 0)
+            .then(|| self.connection_generation.load(Ordering::Relaxed))
     }
 
     pub fn guest_log_level_override(&self) -> Option<LogSeverity> {
@@ -161,17 +175,42 @@ impl GuestDriverRuntime {
         if self.bridge_healthy() {
             return Ok(true);
         }
+        // A background discovery attempt must not race a lazy HID call, or
+        // make the HID caller wait for somebody else's network handshake.
+        let _transition = match self.connection_transition.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => return Ok(false),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(GuestDriverError::StatePoisoned("connection_transition"));
+            }
+        };
+        if self.bridge_healthy() {
+            return Ok(true);
+        }
         let reconnect_interval = self.effective_reconnect_interval();
-        self.clear_bridge("stale or missing bridge");
+        self.clear_bridge_locked();
 
         if !self.should_attempt_connect(reconnect_interval) {
             return Ok(false);
         }
 
-        self.connect_bridge().map(|()| true)
+        self.connect_bridge_locked().map(|()| true)
     }
 
     pub fn connect_bridge(&self) -> Result<(), GuestDriverError> {
+        let _transition = self
+            .connection_transition
+            .lock()
+            .map_err(|_| GuestDriverError::StatePoisoned("connection_transition"))?;
+        if self.bridge_healthy() {
+            return Ok(());
+        }
+        self.clear_bridge_locked();
+        self.connect_bridge_locked()
+    }
+
+    // The caller holds connection_transition through cleanup and publication.
+    fn connect_bridge_locked(&self) -> Result<(), GuestDriverError> {
         let bridge = Arc::new(HostBridge::connect(self.config.host_bridge_config())?);
         let identity_payload = bridge.info().identity.clone();
         let allow_debug_fallback =
@@ -192,14 +231,23 @@ impl GuestDriverRuntime {
             .catalog
             .lock()
             .map_err(|_| GuestDriverError::StatePoisoned("catalog"))? = Some(catalog);
-        *self
+        let mut current = self
             .bridge
             .lock()
-            .map_err(|_| GuestDriverError::StatePoisoned("bridge"))? = Some(bridge);
+            .map_err(|_| GuestDriverError::StatePoisoned("bridge"))?;
+        self.connection_generation.fetch_add(1, Ordering::Relaxed);
+        *current = Some(bridge);
         Ok(())
     }
 
     pub fn clear_bridge(&self, _reason: &'static str) {
+        let Ok(_transition) = self.connection_transition.lock() else {
+            return;
+        };
+        self.clear_bridge_locked();
+    }
+
+    fn clear_bridge_locked(&self) {
         let removed_bridge = self.bridge.lock().ok().and_then(|mut bridge| bridge.take());
         drop(removed_bridge);
         self.reset_trace_limiter();
@@ -207,6 +255,12 @@ impl GuestDriverRuntime {
     }
 
     fn clear_bridge_if_current(&self, current_bridge: &Arc<HostBridge>, _reason: &'static str) {
+        // Another caller may already be replacing this failed connection.
+        // Let that attempt finish rather than block the input thread or erase
+        // the replacement catalog when the old request eventually fails.
+        let Ok(_transition) = self.connection_transition.try_lock() else {
+            return;
+        };
         let removed_bridge = self.bridge.lock().ok().and_then(|mut bridge| {
             if bridge
                 .as_ref()
@@ -553,6 +607,158 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    fn finish_test_handshake(
+        listeners: &TransportListeners,
+        mut control: ChannelStream,
+        request_id: u32,
+    ) -> (ChannelStream, ChannelStream) {
+        write_test_payload(
+            &mut control,
+            request_id,
+            &HelloOk::success_with_trace_and_overrides(
+                7,
+                0x12345,
+                54,
+                GuestRuntimeOverrides::default(),
+            ),
+        );
+        write_test_payload(&mut control, 0, &default_fallback_identity());
+        let mut input = listeners.accept_input().unwrap();
+        input
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let attach = input.read_frame().unwrap();
+        write_test_payload(
+            &mut input,
+            attach.header.id,
+            &InputAttachOk {
+                status: StatusCode::Ok,
+                input_report_len: 54,
+                first_input_seq: 1,
+            },
+        );
+        (control, input)
+    }
+
+    #[test]
+    fn late_host_can_connect_after_initial_connection_refused() {
+        let reservation = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let addrs = reservation.local_addrs().unwrap();
+        drop(reservation);
+        let runtime = GuestDriverRuntime::new(RuntimeConfig {
+            addrs,
+            host_bridge_enabled: true,
+            host_bridge_required: true,
+            lazy_reconnect_interval: Duration::ZERO,
+            ..RuntimeConfig::default()
+        });
+        assert!(runtime.ensure_connected_result().is_err());
+        assert_eq!(runtime.live_connection_generation(), None);
+        assert!(runtime.catalog_if_connected().is_none());
+
+        let listeners = TransportListeners::bind(addrs).unwrap();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut control = listeners.accept_control().unwrap();
+            control
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let hello = control.read_frame().unwrap();
+            let _streams = finish_test_handshake(&listeners, control, hello.header.id);
+            finish_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        });
+        assert!(runtime.ensure_connected_result().unwrap());
+        assert_eq!(runtime.live_connection_generation(), Some(1));
+        assert!(runtime.catalog_if_connected().is_some());
+        finish_tx.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn concurrent_lazy_call_does_not_start_second_handshake_or_block() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let runtime = Arc::new(GuestDriverRuntime::new(RuntimeConfig {
+            addrs: listeners.local_addrs().unwrap(),
+            host_bridge_enabled: true,
+            host_bridge_required: true,
+            lazy_reconnect_interval: Duration::ZERO,
+            ..RuntimeConfig::default()
+        }));
+        let (hello_tx, hello_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut control = listeners.accept_control().unwrap();
+            control
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let hello = control.read_frame().unwrap();
+            hello_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let _streams = finish_test_handshake(&listeners, control, hello.header.id);
+            listeners.set_nonblocking(true).unwrap();
+            assert!(listeners.accept_control().is_err());
+            finish_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        });
+        let connector = {
+            let runtime = Arc::clone(&runtime);
+            thread::spawn(move || runtime.ensure_connected_result())
+        };
+        hello_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let started = Instant::now();
+        assert!(runtime.catalog_result().unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(runtime.live_connection_generation(), None);
+        resume_tx.send(()).unwrap();
+        assert!(connector.join().unwrap().unwrap());
+        assert_eq!(runtime.live_connection_generation(), Some(1));
+        finish_tx.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn reconnect_advances_generation_and_late_old_failure_keeps_new_catalog() {
+        let listeners = TransportListeners::bind(TransportAddrs::loopback(0, 0)).unwrap();
+        let runtime = GuestDriverRuntime::new(RuntimeConfig {
+            addrs: listeners.local_addrs().unwrap(),
+            host_bridge_enabled: true,
+            host_bridge_required: true,
+            lazy_reconnect_interval: Duration::ZERO,
+            ..RuntimeConfig::default()
+        });
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut streams = Vec::new();
+            for _ in 0..2 {
+                let mut control = listeners.accept_control().unwrap();
+                control
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let hello = control.read_frame().unwrap();
+                streams.push(finish_test_handshake(&listeners, control, hello.header.id));
+            }
+            finish_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        });
+        assert!(runtime.ensure_connected());
+        let old = runtime.bridge.lock().unwrap().as_ref().unwrap().clone();
+        let first_trace_id = runtime.session_trace_id();
+        let handle = runtime.open_profile(VirtualHidProfile::Main).unwrap();
+        runtime.clear_bridge("host restart");
+        assert_eq!(runtime.live_connection_generation(), None);
+        assert!(runtime.ensure_connected());
+        assert_eq!(runtime.session_trace_id(), first_trace_id);
+        assert_eq!(runtime.live_connection_generation(), Some(2));
+        runtime.clear_bridge_if_current(&old, "late old request failure");
+        assert_eq!(runtime.live_connection_generation(), Some(2));
+        assert!(runtime.catalog_if_connected().is_some());
+        assert_eq!(
+            runtime.handle_profile(handle).unwrap(),
+            VirtualHidProfile::Main
+        );
+        finish_tx.send(()).unwrap();
+        server.join().unwrap();
+    }
 
     #[test]
     fn required_mode_starts_without_advertised_profiles() {

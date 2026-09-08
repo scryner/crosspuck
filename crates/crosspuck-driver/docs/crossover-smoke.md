@@ -16,6 +16,8 @@ The smoke test checks:
 - `ReadFile`, `HidD_GetInputReport`, feature/output/write paths produce trace
   markers when exercised.
 - Host disconnect and reconnect do not crash the Steam process.
+- Starting the host after Steam discovers the controller automatically, with
+  no Steam restart, controller-settings reopen, or external notification helper.
 
 The test does not prove long-session stability. Keep the 5 minute idle and
 reconnect test as a separate pass before calling the driver release-ready.
@@ -99,7 +101,8 @@ override that the macOS host app sends over the bridge connection, for example:
 open -a CrossPuck --args --override-log-level --log-level debug
 ```
 
-Quit Steam fully if it was already running before importing the override.
+Quit Steam fully before installing or updating the DLL or importing the override.
+Restarting Steam once is necessary to load the new driver.
 
 ## Run The Smoke
 
@@ -124,8 +127,8 @@ Expected early log markers:
 `hook install ok` and API-level discovery lines are debug-level logs. They are
 only expected when the host applies a debug or trace guest severity override.
 
-The host bridge connects lazily when Steam first performs HID discovery or opens
-one of the synthetic paths:
+The driver retries host discovery independently of Steam's HID calls. Lazy
+discovery/open calls can also initiate the same connection:
 
 ```text
 [crosspuck] lazy bridge connect ok reason=... identity=Live profiles=5 open_handles=0
@@ -146,7 +149,32 @@ touches HID:
 [crosspuck] lazy bridge connect failed reason=...: ...
 ```
 
-Steam should retry through the lazy reconnect path when later HID calls occur.
+The automatic worker retries even if Steam makes no further HID calls. After a
+successful identity handshake and input-channel attachment it notifies SDL:
+
+```text
+[crosspuck] automatic discovery worker started
+[crosspuck] automatic discovery notified SDL change=Arrival(1)
+```
+
+The number is a connection generation within this Steam process. A host restart
+advances it. A disconnected session produces `change=Removal`.
+
+## Late Host Start And Reconnect
+
+1. Quit CrossPuck and start Steam with the updated driver installed.
+2. Open controller settings and record the Steam process ID and current log
+   position. Leave the screen open.
+3. Start CrossPuck. Do not reopen settings or run the PoC notification helper.
+4. Confirm a successful bridge connection and an automatic SDL arrival in the
+   new log lines, followed by controller recognition and working input.
+5. Quit CrossPuck, wait five seconds, then start it again. Confirm another
+   arrival generation and working input with the same Steam process ID.
+6. Separately check the original host-first launch order and rumble/ping.
+
+Run this with the physical Puck connected and Input Monitoring permission
+enabled. Also verify that starting CrossPuck with no accessible Puck does not
+advertise a working controller; connect the Puck and check automatic recovery.
 
 ## Manual UI Steps
 
@@ -179,6 +207,10 @@ Common warning causes:
 - SDL hidapi was not loaded by this Steam process, in which case the Win32 HID
   markers are the relevant path.
 
+The script scans the whole selected log. For late-start/reconnect validation,
+save only the lines added during that test and pass `--log-file <saved-log>` so
+an earlier successful session cannot hide a failure.
+
 ## Success Criteria
 
 Minimum pass:
@@ -192,6 +224,8 @@ Minimum pass:
 - Input actions produce host-backed input trace or visible Steam UI response.
 - Feature/output/write actions do not fail the UI flow.
 - Host app stop/start does not crash Steam and later actions recover.
+- Host-late startup and restart produce an automatic SDL arrival and working
+  input while the Steam process ID remains unchanged.
 
 ## Rollback
 

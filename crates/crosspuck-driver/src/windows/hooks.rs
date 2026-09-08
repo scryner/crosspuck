@@ -130,19 +130,20 @@ fn install_optional_hook(
     proc_name: &str,
     detour: *mut c_void,
     set_original: impl FnOnce(*mut c_void) -> Result<(), String>,
-) {
+) -> bool {
     let Ok((trampoline, target)) = create_hook_api(module, proc_name, detour) else {
-        return;
+        return false;
     };
     if let Err(error) = set_original(trampoline) {
         sdl::log_optional_hook_error(module, proc_name, &error);
-        return;
+        return false;
     }
     if let Err(error) = enable_hook(target) {
         sdl::log_optional_hook_error(module, proc_name, &format!("{error:?}"));
-        return;
+        return false;
     }
     sdl::log_optional_hook_installed(module, proc_name);
+    true
 }
 
 fn install_sdl_hidapi_hooks() {
@@ -153,18 +154,19 @@ fn install_sdl_hidapi_hooks() {
         sdl::detoured_sdl_hid_close as *mut c_void,
         sdl::set_original_sdl_hid_close,
     );
-    install_optional_hook(
-        "SDL3.dll",
-        "SDL_hid_enumerate",
-        sdl::detoured_sdl_hid_enumerate as *mut c_void,
-        sdl::set_original_sdl_hid_enumerate,
-    );
-    install_optional_hook(
+    if install_optional_hook(
         "SDL3.dll",
         "SDL_hid_free_enumeration",
         sdl::detoured_sdl_hid_free_enumeration as *mut c_void,
         sdl::set_original_sdl_hid_free_enumeration,
-    );
+    ) {
+        install_optional_hook(
+            "SDL3.dll",
+            "SDL_hid_enumerate",
+            sdl::detoured_sdl_hid_enumerate as *mut c_void,
+            sdl::set_original_sdl_hid_enumerate,
+        );
+    }
     install_optional_hook(
         "SDL3.dll",
         "SDL_hid_open_path",

@@ -112,7 +112,9 @@ open -a CrossPuck --args --override-log-level --log-level debug
 
 ## 4. Host app 실행
 
-macOS에서 CrossPuck host app을 먼저 실행합니다.
+기존 host-first 경로는 macOS에서 CrossPuck host app을 먼저 실행해 확인합니다.
+드라이버 설치 후에는 실행 순서와 관계없이 동작해야 합니다. 새 DLL을 로드하기
+위한 Steam 재시작은 설치/업데이트 때 한 번 필요합니다.
 
 확인할 것:
 
@@ -143,7 +145,8 @@ CrossOver에서 Steam bottle의 Steam을 실행합니다.
 
 `hook install ok`와 API discovery 세부 로그는 debug level 로그이므로 host app이 debug 또는 trace guest severity override를 내렸을 때만 나옵니다.
 
-host bridge는 Steam이 HID discovery를 하거나 synthetic path를 여는 시점에 lazy로 연결됩니다.
+드라이버의 자동 탐색 worker가 Steam의 HID 호출과 독립적으로 host 연결을
+재시도합니다. HID discovery나 synthetic path open 시점에도 같은 연결을 시도할 수 있습니다.
 
 ```text
 [crosspuck] lazy bridge connect ok reason=... identity=Live profiles=5 open_handles=0
@@ -155,7 +158,29 @@ host app을 늦게 켠 경우에는 다음 로그가 먼저 나올 수 있습니
 [crosspuck] lazy bridge connect failed reason=...: ...
 ```
 
-이 경우 host app을 켠 뒤 Steam에서 controller 관련 화면을 다시 열어 lazy reconnect가 발생하는지 확인합니다.
+이 경우 host app을 켜면 추가 조작 없이 자동 연결되어야 합니다. 연결과 input
+channel attach가 완료된 뒤 다음과 같은 SDL 재탐색 통지가 기록됩니다.
+
+```text
+[crosspuck] automatic discovery worker started
+[crosspuck] automatic discovery notified SDL change=Arrival(1)
+```
+
+숫자는 해당 Steam 프로세스 안의 연결 세대이며 재연결마다 증가합니다.
+연결이 끊기면 `change=Removal`이 기록됩니다.
+
+### Host를 나중에 실행하는 경로
+
+1. CrossPuck을 종료한 상태에서 새 DLL을 설치한 Steam을 시작합니다.
+2. Controller settings를 열고 Steam PID와 현재 로그 위치를 기록합니다.
+3. 화면을 그대로 둔 채 CrossPuck을 시작합니다. 설정 화면을 다시 열거나 PoC
+   notification helper를 실행하지 않습니다.
+4. 이번 실행에서 추가된 로그에 연결 성공과 자동 SDL arrival이 기록되고,
+   controller가 표시되며 실제 입력이 반영되는지 확인합니다.
+5. CrossPuck을 종료하고 5초 후 다시 시작합니다. Steam PID가 유지된 상태에서
+   새로운 arrival 세대와 입력 복구를 확인합니다.
+6. Puck을 연결하지 않은 상태에서는 동작 가능한 장치로 광고하지 않는지,
+   Puck 연결 후에는 자동으로 복구되는지도 별도로 확인합니다.
 
 ## 7. Steam UI smoke
 
@@ -169,7 +194,7 @@ Steam에서 다음을 직접 확인합니다.
 6. host app을 종료하고 5초 정도 기다립니다.
 7. Steam이 crash하지 않는지 확인합니다.
 8. host app을 다시 실행합니다.
-9. controller settings/test UI를 다시 열거나 입력을 다시 수행해 복구 여부를 확인합니다.
+9. 화면을 다시 열지 않고 장치 인식과 입력이 자동으로 복구되는지 확인합니다.
 
 입력/feature/write가 실제로 호출되고 host-owned diagnostic 설정이 충분히 자세하면 다음 계열 로그가 나옵니다.
 
@@ -208,6 +233,10 @@ tools/smoke-check.sh --bottle Steam
 - `WARN log marker missing`: 필수 smoke marker가 없으므로 Steam이 DLL을 로드했는지, host app이 실행 중인지, 해당 API 경로를 밟았는지 확인합니다.
 - `INFO optional log marker missing`: debug/trace logging을 켜지 않았거나 해당 UI 경로를 밟지 않았다면 정상입니다.
 
+스크립트는 지정한 로그 전체를 검사합니다. 늦은 실행/재연결 검증에서는 해당
+구간에 추가된 줄만 별도 파일로 저장하고 `--log-file <저장한 로그>`를 지정해
+과거 성공 기록이 이번 실패를 가리지 않도록 합니다.
+
 ## 9. 통과 기준
 
 최소 통과:
@@ -218,6 +247,8 @@ tools/smoke-check.sh --bottle Steam
 - host app 실행 상태에서 `lazy bridge connect ok` 또는 이후 host-backed HID 호출 trace가 있습니다.
 - Steam UI에서 controller가 연결된 장치로 표시되거나 입력 반응이 있습니다.
 - host app 종료/재실행 후 Steam이 crash하지 않고, 이후 controller 관련 동작이 복구됩니다.
+- host를 나중에 실행하거나 재시작해도 Steam PID가 유지된 채 자동 SDL arrival,
+  장치 인식, 실제 입력 복구가 확인됩니다.
 
 권장 추가 통과:
 

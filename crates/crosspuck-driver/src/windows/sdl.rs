@@ -3,10 +3,12 @@ use super::handles::{handle_for_profile, profile_for_handle};
 use super::log::{debug_line, error_line, trace_line};
 use super::proc::fn_from_mut;
 use super::state;
+use crate::sdl_enumeration::{OwnedSdlEnumeration, SdlHidDeviceInfo};
 use crosspuck_core::guest_driver::{
     classify_hid_query, hid_query_may_target_crosspuck, path_may_be_virtual, HidQueryRoute,
     VirtualHandleId, VirtualHidProfile, VirtualHidProfileCatalog,
 };
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::fmt;
 use std::ptr;
@@ -38,7 +40,8 @@ static ORIGINAL_SDL_HID_READ_TIMEOUT: OnceLock<SdlHidReadTimeoutFn> = OnceLock::
 static ORIGINAL_SDL_HID_WRITE: OnceLock<SdlHidWriteFn> = OnceLock::new();
 static ORIGINAL_SDL_HID_GET_FEATURE_REPORT: OnceLock<SdlHidGetFeatureReportFn> = OnceLock::new();
 static ORIGINAL_SDL_HID_SEND_FEATURE_REPORT: OnceLock<SdlHidSendFeatureReportFn> = OnceLock::new();
-static SDL_AUGMENTED_ENUMERATIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+static SDL_AUGMENTED_ENUMERATIONS: OnceLock<Mutex<HashMap<usize, OwnedSdlEnumeration>>> =
+    OnceLock::new();
 static SDL_OPEN_SENTINELS: OnceLock<Mutex<Vec<(VirtualHidProfile, VirtualHandleId)>>> =
     OnceLock::new();
 static SDL_FAILURE_LOGS: OnceLock<Mutex<Vec<SdlFailureLog>>> = OnceLock::new();
@@ -70,25 +73,6 @@ struct SdlReadLog {
     profile: VirtualHidProfile,
     last: Instant,
     suppressed: u32,
-}
-
-#[repr(C)]
-pub struct SdlHidDeviceInfo {
-    path: *mut c_char,
-    vendor_id: u16,
-    product_id: u16,
-    serial_number: *mut u16,
-    release_number: u16,
-    manufacturer_string: *mut u16,
-    product_string: *mut u16,
-    usage_page: u16,
-    usage: u16,
-    interface_number: c_int,
-    interface_class: c_int,
-    interface_subclass: c_int,
-    interface_protocol: c_int,
-    bus_type: c_int,
-    next: *mut SdlHidDeviceInfo,
 }
 
 pub fn load_sdl3() {
@@ -208,7 +192,26 @@ pub unsafe extern "C" fn detoured_sdl_hid_enumerate(
         return original;
     }
 
-    let augmented = augment_sdl_hid_enumeration(original, &catalog);
+    // Enumeration is enabled only after the free hook is installed. Keep the
+    // original SDL allocation untouched and free it using SDL's allocator.
+    let Some(free_original) = ORIGINAL_SDL_HID_FREE_ENUMERATION.get().copied() else {
+        return original;
+    };
+    let Ok(mut allocations) = SDL_AUGMENTED_ENUMERATIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    else {
+        return original;
+    };
+    let mut owned = OwnedSdlEnumeration::augment(original, &catalog);
+    let augmented = owned.head();
+    if !augmented.is_null() {
+        allocations.insert(augmented as usize, owned);
+    }
+    drop(allocations);
+    if !original.is_null() {
+        free_original(original);
+    }
     debug_line(&format!(
         "[crosspuck] SDL_hid_enumerate vid=0x{vendor_id:04X} pid=0x{product_id:04X} original={original:p} returned={augmented:p}"
     ));
@@ -216,9 +219,16 @@ pub unsafe extern "C" fn detoured_sdl_hid_enumerate(
 }
 
 pub unsafe extern "C" fn detoured_sdl_hid_free_enumeration(device_info: *mut SdlHidDeviceInfo) {
-    if is_augmented_sdl_enumeration(device_info) {
+    let owned = SDL_AUGMENTED_ENUMERATIONS.get().and_then(|allocations| {
+        allocations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&(device_info as usize))
+    });
+    if let Some(owned) = owned {
+        drop(owned);
         debug_line(&format!(
-            "[crosspuck] SDL_hid_free_enumeration augmented head={device_info:p} leaked"
+            "[crosspuck] SDL_hid_free_enumeration augmented head={device_info:p} freed"
         ));
         return;
     }
@@ -458,127 +468,6 @@ pub unsafe extern "C" fn detoured_sdl_hid_send_feature_report(
     }
 }
 
-unsafe fn augment_sdl_hid_enumeration(
-    head: *mut SdlHidDeviceInfo,
-    catalog: &VirtualHidProfileCatalog,
-) -> *mut SdlHidDeviceInfo {
-    let mut seen = Vec::new();
-    let mut tail = ptr::null_mut();
-    let mut cursor = head;
-    while !cursor.is_null() {
-        tail = cursor;
-        let path = narrow_z_to_string((*cursor).path as PCSTR).unwrap_or_default();
-        if let Some(profile) = catalog.profile_for_path(&path) {
-            rewrite_sdl_hid_device_info(cursor, catalog, profile);
-            if !seen.contains(&profile) {
-                seen.push(profile);
-            }
-        }
-        cursor = (*cursor).next;
-    }
-
-    let missing_profiles = catalog
-        .descriptors()
-        .iter()
-        .map(|descriptor| descriptor.profile)
-        .filter(|profile| !seen.contains(profile))
-        .collect::<Vec<_>>();
-    let synthetic_head = build_sdl_hid_info_list(catalog, &missing_profiles);
-    let result = if head.is_null() {
-        synthetic_head
-    } else {
-        if !tail.is_null() {
-            (*tail).next = synthetic_head;
-        }
-        head
-    };
-
-    remember_augmented_sdl_enumeration(result);
-    result
-}
-
-unsafe fn rewrite_sdl_hid_device_info(
-    device_info: *mut SdlHidDeviceInfo,
-    catalog: &VirtualHidProfileCatalog,
-    profile: VirtualHidProfile,
-) {
-    if device_info.is_null() {
-        return;
-    }
-    let Some(descriptor) = catalog.descriptor(profile) else {
-        return;
-    };
-    let Some(path) = catalog.device_path(profile) else {
-        return;
-    };
-    let identity = catalog.identity();
-
-    (*device_info).path = leak_c_string(&path);
-    (*device_info).vendor_id = identity.vendor_id;
-    (*device_info).product_id = identity.product_id;
-    (*device_info).serial_number = leak_wide_string(&identity.serial);
-    (*device_info).release_number = identity.version_number;
-    (*device_info).manufacturer_string = leak_wide_string(&identity.manufacturer);
-    (*device_info).product_string = leak_wide_string(&identity.product);
-    (*device_info).usage_page = descriptor.usage_page;
-    (*device_info).usage = descriptor.usage;
-    (*device_info).interface_number = c_int::from(descriptor.interface_number);
-    (*device_info).interface_class = 0;
-    (*device_info).interface_subclass = 0;
-    (*device_info).interface_protocol = 0;
-    (*device_info).bus_type = 1;
-    debug_line(&format!(
-        "[crosspuck] SDL_hid_enumerate rewrite profile={} path={path:?}",
-        profile.label()
-    ));
-}
-
-unsafe fn build_sdl_hid_info_list(
-    catalog: &VirtualHidProfileCatalog,
-    profiles: &[VirtualHidProfile],
-) -> *mut SdlHidDeviceInfo {
-    let mut head: *mut SdlHidDeviceInfo = ptr::null_mut();
-    let mut tail: *mut SdlHidDeviceInfo = ptr::null_mut();
-    let identity = catalog.identity();
-    for profile in profiles.iter().copied() {
-        let Some(descriptor) = catalog.descriptor(profile) else {
-            continue;
-        };
-        let Some(path) = catalog.device_path(profile) else {
-            continue;
-        };
-        let node = Box::into_raw(Box::new(SdlHidDeviceInfo {
-            path: leak_c_string(&path),
-            vendor_id: identity.vendor_id,
-            product_id: identity.product_id,
-            serial_number: leak_wide_string(&identity.serial),
-            release_number: identity.version_number,
-            manufacturer_string: leak_wide_string(&identity.manufacturer),
-            product_string: leak_wide_string(&identity.product),
-            usage_page: descriptor.usage_page,
-            usage: descriptor.usage,
-            interface_number: c_int::from(descriptor.interface_number),
-            interface_class: 0,
-            interface_subclass: 0,
-            interface_protocol: 0,
-            bus_type: 1,
-            next: ptr::null_mut(),
-        }));
-
-        if head.is_null() {
-            head = node;
-        } else {
-            (*tail).next = node;
-        }
-        tail = node;
-        debug_line(&format!(
-            "[crosspuck] SDL_hid_enumerate append synthetic profile={} path={path:?}",
-            profile.label()
-        ));
-    }
-    head
-}
-
 unsafe fn open_synthetic_path(path: &str) -> Option<*mut c_void> {
     if !path_may_be_virtual(path) {
         return None;
@@ -679,29 +568,6 @@ fn read_sdl_report(
     }
 }
 
-fn remember_augmented_sdl_enumeration(head: *mut SdlHidDeviceInfo) {
-    if head.is_null() {
-        return;
-    }
-    if let Ok(mut heads) = SDL_AUGMENTED_ENUMERATIONS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-    {
-        let value = head as usize;
-        if !heads.contains(&value) {
-            heads.push(value);
-        }
-    }
-}
-
-fn is_augmented_sdl_enumeration(head: *mut SdlHidDeviceInfo) -> bool {
-    let Some(heads) = SDL_AUGMENTED_ENUMERATIONS.get() else {
-        return false;
-    };
-    let value = head as usize;
-    heads.lock().is_ok_and(|heads| heads.contains(&value))
-}
-
 unsafe fn narrow_z_to_string(ptr: PCSTR) -> Option<String> {
     if ptr.is_null() {
         return None;
@@ -712,18 +578,6 @@ unsafe fn narrow_z_to_string(ptr: PCSTR) -> Option<String> {
         len += 1;
     }
     Some(String::from_utf8_lossy(slice::from_raw_parts(ptr, len)).to_string())
-}
-
-fn leak_c_string(value: &str) -> *mut c_char {
-    CString::new(value)
-        .unwrap_or_else(|_| CString::new("").expect("empty CString is valid"))
-        .into_raw()
-}
-
-fn leak_wide_string(value: &str) -> *mut u16 {
-    let mut units = value.encode_utf16().collect::<Vec<_>>();
-    units.push(0);
-    Box::leak(units.into_boxed_slice()).as_mut_ptr()
 }
 
 fn len_to_u32(len: usize) -> Option<u32> {
