@@ -8,6 +8,9 @@
 CrossPuck lets Steam running in a CrossOver bottle use a Steam Controller
 connected to the macOS host.
 
+It also keeps running CrossOver game audio following the macOS output device,
+including switching between speakers and AirPods without restarting the game.
+
 _If CrossPuck helps you, a GitHub star would be appreciated._ ⭐
 
 The project is split into two production pieces:
@@ -71,6 +74,32 @@ currently in use, and `Reset to Default` returns to auto-detection. Two
 environment variables override this for scripting: `CROSSPUCK_BOTTLE_PATH`
 selects a specific bottle and takes precedence over the menu selection, and
 `CROSSPUCK_BOTTLES_DIR` changes the directory that auto-detection scans.
+
+### Automatic Audio Output Switching
+
+`Follow macOS Audio Output` in the menu bar is enabled by default. It applies
+to audio from **all running CrossOver bottles**, including bottles on external
+drives, independently of the controller's selected bottle. The setting is
+remembered when CrossPuck restarts. The `Audio:` line shows the current output
+or connection status.
+
+This feature requires macOS 14.2 or later. On first use, allow CrossPuck's
+**System Audio Recording** request. If access was denied, enable CrossPuck in
+System Settings > Privacy & Security > Screen & System Audio Recording, then
+turn the menu option off and back on. Controller input separately requires
+Input Monitoring permission.
+
+CrossPuck only reroutes a CrossOver audio process when its output differs from
+the macOS default. When it already matches, the game plays directly, preserving
+its original volume. Turning the option off or quitting CrossPuck restores
+the game's original output. Audio is processed locally in memory; it is not
+saved or uploaded. Microphone streams are disabled before playback starts.
+
+Output changes can cause a brief interruption while the route is rebuilt.
+If a device or format cannot be routed, CrossPuck releases the route and retries
+while the game's original output remains available. See
+[audio routing design and validation](docs/audio-routing.md) for tested devices
+and remaining hardware coverage.
 
 ### Verify Wine DLL Override
 

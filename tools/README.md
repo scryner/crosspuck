@@ -77,6 +77,18 @@ The script does not notarize. CI can run Apple notarization and stapling before
 or after this packaging step, depending on whether the release process notarizes
 the app bundle or the final DMG.
 
+## Audio Routing
+
+Audio engine regression tests (macOS 14.2+, Clang with sanitizers):
+
+```sh
+sh tools/test-audio-engine.sh
+```
+
+Build the app with `tools/build-app.sh` so its `CrossPuckAudio` helper and
+system-audio usage description are included. See [audio routing](../docs/audio-routing.md)
+for lifecycle behavior and hardware validation.
+
 ## Logging
 
 Host app logs use macOS Unified Logging.

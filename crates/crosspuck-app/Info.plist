@@ -18,6 +18,8 @@
   <string>1</string>
   <key>NSInputMonitoringUsageDescription</key>
   <string>CrossPuck reads Steam Controller HID input and forwards controller feedback for CrossOver Steam.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>CrossPuck routes CrossOver game audio to your current macOS output device. Audio is processed locally and is not recorded or uploaded.</string>
   <key>LSUIElement</key>
   <true/>
 </dict>

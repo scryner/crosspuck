@@ -1,6 +1,6 @@
 //! Persistent user preferences for the CrossPuck menu bar app.
 //!
-//! Today this is just the CrossOver bottle selection. CrossPuck normally
+//! Stores the audio-follow preference and CrossOver bottle selection. CrossPuck normally
 //! auto-detects the Steam bottle under the default CrossOver bottles
 //! directory, but bottles can live elsewhere (for example on an external
 //! drive) and a machine can have several bottles with Steam installed, so the
@@ -24,6 +24,19 @@ use std::path::{Path, PathBuf};
 const BOTTLES_DIR_ENV: &str = "CROSSPUCK_BOTTLES_DIR";
 /// `UserDefaults` key holding the user-selected bottle.
 const BOTTLE_PATH_DEFAULTS_KEY: &str = "BottlePath";
+const FOLLOW_AUDIO_OUTPUT_KEY: &str = "FollowAudioOutput";
+
+/// Enabled on first launch and upgrade; an explicitly stored false stays false.
+pub fn follow_audio_output() -> bool {
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str(FOLLOW_AUDIO_OUTPUT_KEY);
+    defaults.objectForKey(&key).is_none() || defaults.boolForKey(&key)
+}
+
+pub fn set_follow_audio_output(enabled: bool) {
+    NSUserDefaults::standardUserDefaults()
+        .setBool_forKey(enabled, &NSString::from_str(FOLLOW_AUDIO_OUTPUT_KEY));
+}
 
 /// Resolve the explicitly selected CrossOver bottle, if any (env var first,
 /// then the persisted menu selection). `None` means auto-detection.

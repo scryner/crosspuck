@@ -115,6 +115,10 @@ sign_app_bundle() {
   local identity="$2"
 
   require_command codesign
+  if [ -f "$app/Contents/MacOS/CrossPuckAudio" ]; then
+    codesign --force --timestamp --options runtime --sign "$identity" \
+      --identifier com.github.scryner.crosspuck.audio "$app/Contents/MacOS/CrossPuckAudio"
+  fi
   codesign --force --timestamp --options runtime --sign "$identity" "$app"
   codesign --verify --strict --verbose=4 "$app"
 }

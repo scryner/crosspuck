@@ -116,6 +116,7 @@ guest_driver_dir="$resources_dir/GuestDriver"
 rm -rf "$app_dir"
 mkdir -p "$macos_dir" "$resources_dir" "$guest_driver_dir"
 cp "$root_dir/target/$profile/CrossPuck" "$macos_dir/CrossPuck"
+cp "$root_dir/target/$profile/CrossPuckAudio" "$macos_dir/CrossPuckAudio"
 cp "$root_dir/crates/crosspuck-app/Info.plist" "$contents_dir/Info.plist"
 set_bundle_version "$contents_dir/Info.plist" "$app_version"
 cp -R "$root_dir/crates/crosspuck-app/Resources/." "$resources_dir/"
@@ -135,5 +136,10 @@ cat > "$guest_driver_dir/manifest.json" <<EOF
   "size": $driver_size
 }
 EOF
+
+# Sign nested code first so local builds have stable bundle identities for TCC.
+# Distribution builds can replace these ad-hoc signatures with Developer ID.
+codesign --force --sign - --identifier com.github.scryner.crosspuck.audio "$macos_dir/CrossPuckAudio"
+codesign --force --sign - --identifier com.github.scryner.crosspuck "$app_dir"
 
 echo "$app_dir"

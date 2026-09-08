@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "macOS menu bar shell for the CrossPuck host service"
+default-run = "CrossPuck"
 
 [features]
 default = []
@@ -12,6 +13,13 @@ profiling = ["dep:pprof"]
 [[bin]]
 name = "CrossPuck"
 path = "src/main.rs"
+
+[[bin]]
+name = "CrossPuckAudio"
+path = "src/audio/helper.rs"
+
+[build-dependencies]
+cc = "1.2"
 
 [dependencies]
 crosspuck-core.workspace = true
@@ -47,6 +55,7 @@ objc2-foundation = { workspace = true, features = [
     "NSBundle",
     "NSAutoreleasePool",
     "NSObject",
+    "NSProcessInfo",
     "NSString",
     "NSTimer",
     "NSURL",
