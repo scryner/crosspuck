@@ -172,13 +172,18 @@ This is a stress test of the retry path, not the growth rate of a normal game
 session.
 
 Local helper measurements used `proc_pid_rusage`, excluding the first five
-seconds. CPU percentages are relative to one CPU core. Both baseline and
-updated runs used the same running Steam instance and output devices:
+seconds. CPU percentages are relative to one CPU core. The CPU counters on
+this Apple Silicon machine require the Mach timebase conversion (125/3) before
+converting to seconds. The figures below were corrected on 2026-09-09; the
+original report incorrectly treated raw ticks as nanoseconds and understated
+absolute CPU usage by 41.67 times. The conversion was cross-checked against
+`ps` cumulative CPU time. Memory and functional results are unaffected.
+Both baseline and updated runs used the same running Steam instance and output devices:
 
 | Condition | Before | After |
 | --- | ---: | ---: |
-| Waiting, 30 seconds | 0.018% CPU | 0.003% CPU |
-| Onimusha routed from its original AirPods Max output to Studio Display | 0.014% CPU (30 s) | 0.009% CPU (60 s) |
+| Waiting, 30 seconds | 0.752% CPU | 0.127% CPU |
+| Onimusha routed from its original AirPods Max output to Studio Display | 0.584% CPU (30 s) | 0.375% CPU (60 s) |
 
 The updated live route processed 2,923,008 frames with zero bad buffers and
 successful cleanup. Post-warmup RSS changed by 32 KiB over that measurement.
@@ -207,3 +212,78 @@ change, the app tests, Clippy, release build and live menu lifecycle checks
 were repeated. Logs and comparison fixtures are in ignored
 `target/audio-review/`. The review did not rebuild/notarize the distribution
 DMG or copy an app to /Applications; existing DMGs predate these fixes.
+
+## Installed notarized release inspection (2026-09-09)
+
+Inspected the user's already-running `/Applications/CrossPuck.app` 0.5.0,
+Developer ID signed with hardened runtime, after the game had exited. The app
+(PID 67562) and helper (PID 67585) had been running for about 52 minutes when
+inspection began. Neither process was restarted, toggled, replaced or stopped;
+macOS output settings were left unchanged. Only diagnostics and this report
+were written. CPU observation covered 300 seconds with a sample every two
+seconds and used the corrected Mach timebase conversion. `ps` cumulative CPU
+time independently agrees with the calculated totals.
+
+| Measurement | CrossPuck | CrossPuckAudio |
+| --- | ---: | ---: |
+| Average CPU, one-core basis | 4.75% | 0.216% |
+| CPU time used during 300 seconds | 14.25 s | 0.65 s |
+| Resident memory at start | 62.906 MiB | 22.250 MiB |
+| Resident memory at end | 62.984 MiB | 22.250 MiB |
+| Physical footprint at start | 20.501 MiB | 6.610 MiB |
+| Physical footprint at end | 20.360 MiB | 6.610 MiB |
+| Interrupt wakeups per second | 774.4 | 1.0 |
+
+There is no large or sustained memory-growth trend in this interval. This
+alone does not establish that the app is leak-free:
+
+- The helper passed three live `leaks` checks with zero leaked bytes.
+- The main app initially reported twelve unreachable 256-byte allocations
+  (3,072 bytes). A later check added four 160-byte allocations, bringing the
+  total to sixteen allocations / 3,712 bytes. Conservative scanning and the
+  final check reproduced the same sixteen addresses. These are untyped malloc
+  allocations, distinct from the previous AppIntents/XPC root-cycle report.
+- Allocation-stack logging was not enabled when this release process launched.
+  Therefore these candidates cannot be assigned to a Rust, HIDAPI, IOKit or
+  other allocation site from the available records. Do not dismiss them as
+  OS framework objects or claim no additional leaks. A future diagnostic launch
+  with allocation-stack logging is needed to locate and reproduce the source.
+
+The audio supervisor was parked; the native parent watcher was blocked in
+`poll`. The helper's main thread was in `wait_for_change`, sleeping in the run
+loop and periodically scanning Core Audio clients. No busy loop or active
+`audio_io`/HAL IO thread appeared. The app's active stacks were primarily HID
+report callbacks, `SharedInputReportReader::read_report`, and input-frame
+serialization/transmission. Two worker threads accounted for approximately
+99% of its CPU time in a separate ten-second per-thread snapshot; the audio
+supervisor used only 0.00016 CPU seconds in that interval.
+
+`hid_backend.rs` currently scans the collections using nonblocking reads and
+sleeps for 1 ms when empty. This accounts for frequent wakeups and offers a
+concrete future optimization target. An event-driven queue or carefully tested
+adaptive polling could reduce idle cost; simply stopping HID when the game
+exits would also disable the still-connected Steam controller client. No
+controller or audio implementation was changed during this inspection.
+
+Current game-exit behavior matches the audio design:
+
+- The only CrossOver audio client was `steam.exe` (PID 68029), with
+  `running_output=false` and an empty device list. Onimusha was absent.
+- The actual menu showed `Audio: Following ... AirPods Max`, the native/idle
+  state rather than active routing.
+- The helper stayed in `wait_for_change`; its heap inventory contained no
+  `CATapDescription`, and no audio IO callback thread was observed.
+- An external read-only Core Audio inventory showed zero visible taps and no
+  CrossPuck aggregate device. Private objects are not reliably visible to other
+  processes, so this inventory is corroborating evidence, not sufficient on
+  its own. The helper's state, stack, absent game client and lifecycle code
+  together establish that CrossPuck is waiting rather than capturing audio.
+- Stored logs record routing to Studio Display at 23:52:21 and returning to
+  native AirPods Max output at 23:52:30. The release logs do not include detailed
+  debug cleanup events, so an exact cleanup time relative to game exit cannot
+  be reconstructed. Its current idle state is verified.
+
+The helper remaining alive is expected: it listens for output changes and
+checks for newly active CrossOver audio clients about once a second. This
+control-plane monitoring does not capture or forward PCM. Raw diagnostic
+reports are retained locally under ignored `target/installed-release-review/`.
