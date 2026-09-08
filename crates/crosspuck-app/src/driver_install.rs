@@ -16,6 +16,15 @@ const DRIVER_TARGET_RELATIVE_PATH: &[&str] =
     &["target", "x86_64-pc-windows-gnu", "release", "hid.dll"];
 const CROSSOVER_BOTTLES_RELATIVE_PATH: &[&str] =
     &["Library", "Application Support", "CrossOver", "Bottles"];
+/// Supported Steam installation directories inside a CrossOver bottle, in
+/// priority order.
+const STEAM_DIR_RELATIVE_PATHS: &[&[&str]] = &[
+    &["drive_c", "Program Files (x86)", "Steam"],
+    &["drive_c", "Program Files", "Steam"],
+];
+/// CrossOver bottles can live on case-sensitive volumes, so accept both
+/// spellings used by Windows Steam installations.
+const STEAM_EXE_NAMES: &[&str] = &["Steam.exe", "steam.exe"];
 const HID_DLL_OVERRIDE_VALUE: &str = "native,builtin";
 const WINE_HID_OVERRIDE_REG_FILE_NAME: &str = "crosspuck-wine-override.reg";
 const USER_REG_FILE_NAME: &str = "user.reg";
@@ -298,23 +307,25 @@ pub fn discover_bottle(context: &DriverInstallContext) -> Option<PathBuf> {
 }
 
 pub fn find_steam_dir(bottle_path: impl AsRef<Path>) -> Option<PathBuf> {
-    let drive_c = bottle_path.as_ref().join("drive_c");
-    let mut stack = vec![drive_c];
-    while let Some(path) = stack.pop() {
-        let Ok(entries) = read_dir_sorted(&path) else {
-            continue;
-        };
-        for entry in entries.into_iter().rev() {
-            if entry.is_dir() {
-                stack.push(entry);
-                continue;
-            }
-            if is_steam_exe(&entry) {
-                return entry.parent().map(Path::to_path_buf);
-            }
-        }
-    }
-    None
+    let bottle_path = bottle_path.as_ref();
+
+    // Do not recursively walk `drive_c`. CrossOver commonly exposes host
+    // Documents and Downloads inside `drive_c/users` as directory symlinks;
+    // following them can trigger unrelated macOS Files & Folders prompts.
+    STEAM_DIR_RELATIVE_PATHS
+        .iter()
+        .map(|relative_path| {
+            relative_path
+                .iter()
+                .fold(bottle_path.to_path_buf(), |path, segment| {
+                    path.join(segment)
+                })
+        })
+        .find(|steam_dir| {
+            STEAM_EXE_NAMES
+                .iter()
+                .any(|steam_exe| steam_dir.join(steam_exe).is_file())
+        })
 }
 
 pub fn install_target_for_steam_dir(
@@ -478,12 +489,6 @@ impl From<&EmbeddedDriver> for EmbeddedDriverSummary {
             size: value.actual_size,
         }
     }
-}
-
-fn is_steam_exe(path: &Path) -> bool {
-    path.file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| name.eq_ignore_ascii_case("Steam.exe"))
 }
 
 fn is_system32_hid_target(path: &Path) -> bool {
@@ -895,7 +900,7 @@ impl std::error::Error for DriverInstallError {
 mod tests {
     use super::*;
     use crate::bundle::{DRIVER_DLL_NAME, DRIVER_MANIFEST_NAME, GUEST_DRIVER_DIR};
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     struct TestDir(PathBuf);
 
@@ -1035,6 +1040,41 @@ mod tests {
             ..DriverInstallContext::default()
         });
         assert_eq!(missing_steam.state, DriverInstallState::SteamExeNotFound);
+    }
+
+    #[test]
+    fn find_steam_dir_checks_supported_paths_in_priority_order() {
+        let dir = TestDir::new("steam-paths");
+        let bottle = dir.path().join("Bottle");
+        let x86_steam_dir = bottle.join("drive_c/Program Files (x86)/Steam");
+        let program_files_steam_dir = bottle.join("drive_c/Program Files/Steam");
+        fs::create_dir_all(&x86_steam_dir).unwrap();
+        fs::create_dir_all(&program_files_steam_dir).unwrap();
+        fs::write(x86_steam_dir.join("steam.exe"), b"").unwrap();
+        fs::write(program_files_steam_dir.join("Steam.exe"), b"").unwrap();
+
+        assert_eq!(find_steam_dir(&bottle), Some(x86_steam_dir.clone()));
+
+        fs::remove_file(x86_steam_dir.join("steam.exe")).unwrap();
+        assert_eq!(find_steam_dir(&bottle), Some(program_files_steam_dir));
+    }
+
+    #[test]
+    fn find_steam_dir_does_not_follow_user_folder_symlinks() {
+        let dir = TestDir::new("steam-symlinks");
+        let bottle = dir.path().join("Bottle");
+        let user_dir = bottle.join("drive_c/users/crossover");
+        let linked_documents = dir.path().join("linked-documents");
+        let linked_downloads = dir.path().join("linked-downloads");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::create_dir_all(&linked_documents).unwrap();
+        fs::create_dir_all(&linked_downloads).unwrap();
+        fs::write(linked_documents.join("Steam.exe"), b"").unwrap();
+        fs::write(linked_downloads.join("steam.exe"), b"").unwrap();
+        symlink(&linked_documents, user_dir.join("Documents")).unwrap();
+        symlink(&linked_downloads, user_dir.join("Downloads")).unwrap();
+
+        assert_eq!(find_steam_dir(&bottle), None);
     }
 
     #[test]
